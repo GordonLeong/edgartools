@@ -118,7 +118,18 @@ class ComprehensiveMetricsExtractor:
         income_stmt = financials.income_statement()
         balance_sheet = financials.balance_sheet()
 
-        # Gross Profit - try multiple label variations
+        # Cost of Revenue - extract this FIRST (needed for gross profit calculation)
+        metrics['cost_of_revenue'] = self._extract_from_statement(
+            income_stmt, [
+                'Total Cost of Revenue',
+                'Cost of Revenue',
+                'Cost of Goods Sold',
+                'Cost of Sales',
+                'Cost of Goods and Services Sold'
+            ]
+        )
+
+        # Gross Profit - try extraction first, then calculate if missing
         metrics['gross_profit'] = self._extract_from_statement(
             income_stmt, [
                 'Gross Profit',
@@ -127,6 +138,10 @@ class ComprehensiveMetricsExtractor:
                 'Gross Income'
             ]
         )
+
+        # If gross profit not found as line item, calculate it (common for GOOGL, etc.)
+        if metrics['gross_profit'] is None and metrics.get('revenue') and metrics.get('cost_of_revenue'):
+            metrics['gross_profit'] = metrics['revenue'] - metrics['cost_of_revenue']
 
         # Operating Income - multiple variations
         metrics['operating_income'] = self._extract_from_statement(
@@ -137,17 +152,6 @@ class ComprehensiveMetricsExtractor:
                 'Income (Loss) from Operations',
                 'Operating Profit',
                 'Income from operations'
-            ]
-        )
-
-        # Cost of Revenue (no helper)
-        metrics['cost_of_revenue'] = self._extract_from_statement(
-            income_stmt, [
-                'Total Cost of Revenue',
-                'Cost of Revenue',
-                'Cost of Goods Sold',
-                'Cost of Sales',
-                'Cost of Goods and Services Sold'
             ]
         )
 
