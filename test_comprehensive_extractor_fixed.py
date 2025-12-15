@@ -61,7 +61,7 @@ class ComprehensiveMetricsExtractor:
 
             return None
         except Exception as e:
-            print(f"  Warning: Error extracting from statement: {e}")
+            #print(f"  Warning: Error extracting from statement: {e}")
             return None
 
     def extract_annual_metrics(self) -> Dict:
@@ -89,17 +89,15 @@ class ComprehensiveMetricsExtractor:
         }
 
         # 1. Use helper methods (handle label variations automatically)
-        # IMPORTANT: Ensure all values are converted to float or None
         metrics['revenue'] = self._to_float(financials.get_revenue())
         metrics['net_income'] = self._to_float(financials.get_net_income())
         metrics['operating_cash_flow'] = self._to_float(financials.get_operating_cash_flow())
 
-        # FCF helper might fail on type issues, so wrap it
+        # FCF helper might fail on type issues
         try:
             fcf = financials.get_free_cash_flow()
             metrics['free_cash_flow'] = self._to_float(fcf)
-        except TypeError:
-            # Fallback: calculate manually
+        except (TypeError, AttributeError):
             ocf = self._to_float(financials.get_operating_cash_flow())
             capex = self._to_float(financials.get_capital_expenditures())
             if ocf is not None and capex is not None:
@@ -114,7 +112,7 @@ class ComprehensiveMetricsExtractor:
         metrics['current_assets'] = self._to_float(financials.get_current_assets())
         metrics['current_liabilities'] = self._to_float(financials.get_current_liabilities())
 
-        # 2. Fallback to statement extraction for missing helpers
+        # 2. Fallback to statement extraction for metrics without helpers
         income_stmt = financials.income_statement()
         balance_sheet = financials.balance_sheet()
 
@@ -140,7 +138,7 @@ class ComprehensiveMetricsExtractor:
             ]
         )
 
-        # Cost of Revenue (no helper)
+        # Cost of Revenue
         metrics['cost_of_revenue'] = self._extract_from_statement(
             income_stmt, [
                 'Total Cost of Revenue',
@@ -155,7 +153,7 @@ class ComprehensiveMetricsExtractor:
         self._calculate_margins(metrics)
         self._calculate_ratios(metrics)
 
-        # 4. Get shares outstanding for per-share metrics
+        # 4. Get shares outstanding for per-share metrics - FIXED API
         shares = self._get_shares_outstanding()
         if shares:
             metrics['shares_outstanding'] = shares
@@ -165,182 +163,6 @@ class ComprehensiveMetricsExtractor:
                 metrics['fcf_per_share'] = metrics['free_cash_flow'] / shares
 
         return metrics
-
-    def extract_quarterly_metrics(self) -> Dict:
-        """Extract quarterly metrics (latest 10-Q)."""
-        financials = self.company.get_quarterly_financials()
-        if not financials:
-            return {}
-
-        metrics = {
-            'ticker': self.ticker,
-            'company_name': self.company.name,
-            'period_type': 'quarterly'
-        }
-
-        # Same logic as annual with type safety
-        metrics['revenue'] = self._to_float(financials.get_revenue())
-        metrics['net_income'] = self._to_float(financials.get_net_income())
-        metrics['operating_cash_flow'] = self._to_float(financials.get_operating_cash_flow())
-
-        try:
-            metrics['free_cash_flow'] = self._to_float(financials.get_free_cash_flow())
-        except TypeError:
-            ocf = self._to_float(financials.get_operating_cash_flow())
-            capex = self._to_float(financials.get_capital_expenditures())
-            if ocf and capex:
-                metrics['free_cash_flow'] = ocf - abs(capex)
-
-        metrics['total_assets'] = self._to_float(financials.get_total_assets())
-        metrics['stockholders_equity'] = self._to_float(financials.get_stockholders_equity())
-
-        income_stmt = financials.income_statement()
-        metrics['gross_profit'] = self._extract_from_statement(
-            income_stmt, ['Gross Profit']
-        )
-        metrics['operating_income'] = self._extract_from_statement(
-            income_stmt, ['Operating Income', 'Income from Operations']
-        )
-
-        self._calculate_margins(metrics)
-        self._calculate_ratios(metrics)
-
-        shares = self._get_shares_outstanding()
-        if shares and metrics.get('net_income'):
-            metrics['eps'] = metrics['net_income'] / shares
-        if shares and metrics.get('free_cash_flow'):
-            metrics['fcf_per_share'] = metrics['free_cash_flow'] / shares
-
-        return metrics
-
-    def extract_multi_period_metrics(self, num_periods: int = 4,
-                                    form: str = "10-K") -> pd.DataFrame:
-        """
-        Extract multi-period metrics using XBRLS stitching.
-        Enables growth rate calculations.
-        """
-        from edgar.financials import MultiFinancials
-
-        # Get multiple filings
-        filings = self.company.get_filings(form=form).latest(num_periods)
-        if len(filings) == 0:
-            return pd.DataFrame()
-
-        # Create MultiFinancials (uses XBRLS stitching)
-        multi_financials = MultiFinancials.extract(filings)
-
-        # Get stitched statements (multiple periods in one DataFrame)
-        income_stmt = multi_financials.income_statement()
-        balance_sheet = multi_financials.balance_sheet()
-        cashflow_stmt = multi_financials.cashflow_statement()
-
-        if not income_stmt:
-            return pd.DataFrame()
-
-        # Render with standardization
-        income_df = income_stmt.render(standard=True).to_dataframe()
-        balance_df = balance_sheet.render(standard=True).to_dataframe() if balance_sheet else None
-        cashflow_df = cashflow_stmt.render(standard=True).to_dataframe() if cashflow_stmt else None
-
-        # Extract key metrics across all periods
-        period_cols = [col for col in income_df.columns
-                      if col not in ['concept', 'label', 'level', 'abstract', 'dimension']]
-
-        metrics_over_time = []
-
-        for period_col in period_cols:
-            period_metrics = {
-                'ticker': self.ticker,
-                'period': period_col,
-                'period_type': 'annual' if form == '10-K' else 'quarterly'
-            }
-
-            # Extract from stitched statements
-            period_metrics['revenue'] = self._extract_value_for_period(
-                income_df, ['Revenue', 'Contract Revenue', 'Total Revenue'], period_col
-            )
-            period_metrics['gross_profit'] = self._extract_value_for_period(
-                income_df, ['Gross Profit'], period_col
-            )
-            period_metrics['operating_income'] = self._extract_value_for_period(
-                income_df, ['Operating Income', 'Income from Operations'], period_col
-            )
-            period_metrics['net_income'] = self._extract_value_for_period(
-                income_df, ['Net Income'], period_col
-            )
-
-            if cashflow_df is not None:
-                period_metrics['operating_cash_flow'] = self._extract_value_for_period(
-                    cashflow_df, ['Net Cash from Operating Activities', 'Cash from Operations'], period_col
-                )
-                capex = self._extract_value_for_period(
-                    cashflow_df, ['Capital Expenditures', 'Property, Plant', 'Payments to Acquire'], period_col
-                )
-                if period_metrics.get('operating_cash_flow') and capex:
-                    period_metrics['free_cash_flow'] = period_metrics['operating_cash_flow'] - abs(capex)
-
-            if balance_df is not None:
-                period_metrics['total_assets'] = self._extract_value_for_period(
-                    balance_df, ['Total Assets', 'Assets'], period_col
-                )
-                period_metrics['stockholders_equity'] = self._extract_value_for_period(
-                    balance_df, ["Total Stockholders' Equity", 'Total Equity', 'Stockholders Equity'], period_col
-                )
-
-            # Calculate margins
-            if period_metrics.get('revenue') and period_metrics['revenue'] != 0:
-                rev = period_metrics['revenue']
-                if period_metrics.get('gross_profit'):
-                    period_metrics['gross_margin'] = period_metrics['gross_profit'] / rev
-                if period_metrics.get('operating_income'):
-                    period_metrics['operating_margin'] = period_metrics['operating_income'] / rev
-                if period_metrics.get('net_income'):
-                    period_metrics['net_margin'] = period_metrics['net_income'] / rev
-                if period_metrics.get('free_cash_flow'):
-                    period_metrics['fcf_margin'] = period_metrics['free_cash_flow'] / rev
-
-            # Calculate ROE
-            if period_metrics.get('net_income') and period_metrics.get('stockholders_equity'):
-                if period_metrics['stockholders_equity'] != 0:
-                    period_metrics['roe'] = period_metrics['net_income'] / period_metrics['stockholders_equity']
-
-            metrics_over_time.append(period_metrics)
-
-        # Convert to DataFrame and calculate growth rates
-        df = pd.DataFrame(metrics_over_time)
-
-        if df.empty:
-            return df
-
-        # Sort by period (most recent first)
-        df = df.sort_values('period', ascending=False).reset_index(drop=True)
-
-        # Calculate YoY growth rates
-        for metric in ['revenue', 'operating_income', 'net_income', 'gross_profit', 'free_cash_flow', 'eps']:
-            if metric in df.columns:
-                # Growth from previous period (pct_change with periods=-1 because sorted descending)
-                df[f'{metric}_growth'] = df[metric].pct_change(periods=-1) * 100
-
-        return df
-
-    def _extract_value_for_period(self, df: pd.DataFrame, labels: List[str],
-                                   period_col: str) -> Optional[float]:
-        """Extract value for specific period from multi-period DataFrame."""
-        if df is None or df.empty or period_col not in df.columns:
-            return None
-
-        for label in labels:
-            # Exact match
-            matches = df[df['label'] == label]
-            if not matches.empty:
-                return self._to_float(matches.iloc[0][period_col])
-
-            # Partial match
-            matches = df[df['label'].str.contains(label, case=False, na=False, regex=False)]
-            if not matches.empty:
-                return self._to_float(matches.iloc[0][period_col])
-
-        return None
 
     def _calculate_margins(self, metrics: Dict):
         """Calculate profit margins."""
@@ -482,27 +304,3 @@ if __name__ == "__main__":
         # Save to CSV
         comparison_df.to_csv('financial_metrics_comparison.csv', index=False)
         print("\n✓ Saved to financial_metrics_comparison.csv")
-
-    # Test multi-period extraction
-    print("\n" + "=" * 80)
-    print("MULTI-PERIOD METRICS (AAPL - Last 4 Years)")
-    print("=" * 80)
-
-    try:
-        extractor = ComprehensiveMetricsExtractor("AAPL")
-        multi_period_df = extractor.extract_multi_period_metrics(num_periods=4, form="10-K")
-
-        if not multi_period_df.empty:
-            display_cols = ['period', 'revenue', 'revenue_growth', 'net_income',
-                           'net_income_growth', 'gross_margin', 'roe']
-            display_cols = [col for col in display_cols if col in multi_period_df.columns]
-
-            # Format percentages properly
-            pd.options.display.float_format = '{:.2f}'.format
-            print(multi_period_df[display_cols].to_string(index=False))
-        else:
-            print("No multi-period data available")
-    except Exception as e:
-        print(f"Multi-period extraction failed: {e}")
-        import traceback
-        traceback.print_exc()
