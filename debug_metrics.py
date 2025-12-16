@@ -244,7 +244,33 @@ class MetricsDebugger:
                     continue
 
                 try:
-                    result = facts.query().by_concept(concept).annual().latest(1).execute()
+                    # Try multiple query strategies
+                    result = None
+                    query_type = None
+
+                    # Strategy 1: Latest without filtering by frequency
+                    try:
+                        result = facts.query().by_concept(concept).latest(1).execute()
+                        query_type = "latest (any frequency)"
+                    except:
+                        pass
+
+                    # Strategy 2: Try annual if latest didn't work
+                    if not result or len(result) == 0:
+                        try:
+                            result = facts.query().by_concept(concept).annual().latest(1).execute()
+                            query_type = "annual"
+                        except:
+                            pass
+
+                    # Strategy 3: Try quarterly
+                    if not result or len(result) == 0:
+                        try:
+                            result = facts.query().by_concept(concept).quarterly().latest(1).execute()
+                            query_type = "quarterly"
+                        except:
+                            pass
+
                     if result and len(result) > 0:
                         fact = result[0]
                         value_str = f"{fact.numeric_value:,.0f}" if fact.numeric_value else "N/A"
@@ -253,10 +279,12 @@ class MetricsDebugger:
                         print(f"📌 {concept}")
                         print(f"   └─ Value: {value_str}")
                         print(f"   └─ Date: {date_str}")
+                        print(f"   └─ Query: {query_type}")
                         print()
                         facts_found += 1
                 except Exception as e:
-                    # Silently skip concepts that don't exist
+                    # Show error for debugging
+                    print(f"⚠️  {concept}: {str(e)[:100]}")
                     pass
 
             if facts_found == 0:
