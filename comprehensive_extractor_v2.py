@@ -148,11 +148,39 @@ class FinancialMetricsExtractor:
         # 1. Use helper methods
         metrics['revenue'] = self._to_float(financials.get_revenue())
         metrics['net_income'] = self._to_float(financials.get_net_income())
+
+        # Operating cash flow - with fallback if helper returns empty string
         metrics['operating_cash_flow'] = self._to_float(financials.get_operating_cash_flow())
+        if metrics['operating_cash_flow'] is None:
+            # Fallback: extract directly from cash flow statement
+            cf_stmt = financials.cashflow_statement()
+            metrics['operating_cash_flow'] = self._extract_from_statement(
+                cf_stmt, [
+                    'Net Cash from Operating Activities',
+                    'Net Cash Provided by Operating Activities',
+                    'Cash from Operating Activities',
+                    'Operating Cash Flow',
+                    'Cash Flow from Operations'
+                ]
+            )
+
+        # CapEx - with fallback for different label variations
+        metrics['capex'] = self._to_float(financials.get_capital_expenditures())
+        if metrics['capex'] is None:
+            cf_stmt = financials.cashflow_statement()
+            metrics['capex'] = self._extract_from_statement(
+                cf_stmt, [
+                    'Payments for Property, Plant and Equipment',  # MSFT, NFLX
+                    'Capital Expenditures',
+                    'Purchases of Property, Plant and Equipment',
+                    'Additions to Property and Equipment',
+                    'Payments to Acquire Property',
+                    'Capital Additions'
+                ]
+            )
 
         # FCF - improved extraction
         metrics['free_cash_flow'] = self._extract_fcf(financials)
-        metrics['capex'] = self._to_float(financials.get_capital_expenditures())
 
         metrics['total_assets'] = self._to_float(financials.get_total_assets())
         metrics['total_liabilities'] = self._to_float(financials.get_total_liabilities())
@@ -219,22 +247,43 @@ class FinancialMetricsExtractor:
         # Try 1: Helper method
         try:
             fcf = financials.get_free_cash_flow()
-            if fcf is not None:
-                return self._to_float(fcf)
+            fcf_float = self._to_float(fcf)
+            if fcf_float is not None:
+                return fcf_float
         except:
             pass
 
-        # Try 2: Manual calculation
+        # Try 2: Manual calculation from already-extracted values (preferred)
+        # These were extracted with fallbacks in _extract_raw_metrics
+        # Note: We can't use self.metrics here as it doesn't exist yet
+        # So we extract them again with fallbacks
+        cf_stmt = financials.cashflow_statement()
+
         ocf = self._to_float(financials.get_operating_cash_flow())
+        if ocf is None and cf_stmt:
+            ocf = self._extract_from_statement(
+                cf_stmt, [
+                    'Net Cash from Operating Activities',
+                    'Net Cash Provided by Operating Activities',
+                    'Cash from Operating Activities'
+                ]
+            )
+
         capex = self._to_float(financials.get_capital_expenditures())
+        if capex is None and cf_stmt:
+            capex = self._extract_from_statement(
+                cf_stmt, [
+                    'Payments for Property, Plant and Equipment',
+                    'Capital Expenditures',
+                    'Purchases of Property, Plant and Equipment'
+                ]
+            )
 
         if ocf is not None and capex is not None:
             return ocf - abs(capex)
 
         # Try 3: Direct extraction from cash flow statement
-        cf_stmt = financials.cashflow_statement()
         if cf_stmt:
-            # Try to find explicit FCF line item
             fcf_direct = self._extract_from_statement(
                 cf_stmt, [
                     'Free Cash Flow',
@@ -242,7 +291,7 @@ class FinancialMetricsExtractor:
                     'Free Cash Flow Before Dividends'
                 ]
             )
-            if fcf_direct:
+            if fcf_direct is not None:
                 return fcf_direct
 
         return None

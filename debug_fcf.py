@@ -9,7 +9,18 @@ for ticker in ["AAPL", "MSFT", "TSLA", "NFLX"]:
     print('=' * 80)
 
     company = Company(ticker)
-    financials = company.get_financials()
+
+    # IMPORTANT: Filter out amendments like the main extractor does
+    filings = company.get_filings(form="10-K", amendments=False)
+    if filings and len(filings) > 0:
+        latest_filing = filings.latest(1)
+        if hasattr(latest_filing, 'obj'):
+            tenk = latest_filing.obj()
+            financials = tenk.financials if hasattr(tenk, 'financials') else None
+        else:
+            financials = company.get_financials()
+    else:
+        financials = company.get_financials()
 
     if financials:
         # Try helper method
@@ -20,16 +31,33 @@ for ticker in ["AAPL", "MSFT", "TSLA", "NFLX"]:
             print(f"Helper FCF failed: {e}")
 
         # Get components
-        ocf = financials.get_operating_cash_flow()
-        capex = financials.get_capital_expenditures()
+        ocf_raw = financials.get_operating_cash_flow()
+        capex_raw = financials.get_capital_expenditures()
 
-        print(f"Operating CF: {ocf} (type: {type(ocf)})")
-        print(f"CapEx: {capex} (type: {type(capex)})")
+        print(f"Operating CF raw: {repr(ocf_raw)} (type: {type(ocf_raw)})")
+        print(f"CapEx raw: {repr(capex_raw)} (type: {type(capex_raw)})")
+
+        # Convert to float safely
+        def to_float(val):
+            if val is None or (isinstance(val, str) and val.strip() == ''):
+                return None
+            try:
+                return float(val)
+            except:
+                return None
+
+        ocf = to_float(ocf_raw)
+        capex = to_float(capex_raw)
+
+        print(f"Operating CF converted: {ocf}")
+        print(f"CapEx converted: {capex}")
 
         # Manual calculation
-        if ocf and capex:
+        if ocf is not None and capex is not None:
             manual_fcf = ocf - abs(capex)
             print(f"Manual FCF: {manual_fcf}")
+        else:
+            print(f"Cannot calculate FCF: OCF={ocf}, CapEx={capex}")
 
         # Check cashflow statement labels
         cf_stmt = financials.cashflow_statement()
