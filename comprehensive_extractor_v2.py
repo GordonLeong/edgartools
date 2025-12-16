@@ -310,8 +310,26 @@ class FinancialMetricsExtractor:
 
             for concept in share_concepts:
                 try:
-                    # Try query API
-                    query_result = facts.query().by_concept(concept).annual().latest(1).execute()
+                    # Strategy 1: Try latest without frequency filter (most permissive)
+                    query_result = None
+                    try:
+                        query_result = facts.query().by_concept(concept).latest(1).execute()
+                    except:
+                        pass
+
+                    # Strategy 2: Fall back to annual if needed
+                    if not query_result or len(query_result) == 0:
+                        try:
+                            query_result = facts.query().by_concept(concept).annual().latest(1).execute()
+                        except:
+                            pass
+
+                    # Strategy 3: Try quarterly
+                    if not query_result or len(query_result) == 0:
+                        try:
+                            query_result = facts.query().by_concept(concept).quarterly().latest(1).execute()
+                        except:
+                            pass
 
                     if query_result and len(query_result) > 0:
                         val = self._to_float(query_result[0].numeric_value)
