@@ -297,10 +297,16 @@ class FinancialMetricsExtractor:
         return None
 
     def _get_shares_outstanding(self) -> Optional[float]:
-        """Get shares outstanding with improved debugging."""
+        """Get shares outstanding using multiple strategies."""
         try:
             facts = self.company.get_facts()
 
+            # Strategy 1: Try the direct property (uses dei:EntityCommonStockSharesOutstanding)
+            shares = facts.shares_outstanding
+            if shares and shares > 0:
+                return shares
+
+            # Strategy 2: Try us-gaap concepts with query API
             share_concepts = [
                 'us-gaap:CommonStockSharesOutstanding',
                 'us-gaap:WeightedAverageNumberOfSharesOutstandingBasic',
@@ -310,26 +316,8 @@ class FinancialMetricsExtractor:
 
             for concept in share_concepts:
                 try:
-                    # Strategy 1: Try latest without frequency filter (most permissive)
-                    query_result = None
-                    try:
-                        query_result = facts.query().by_concept(concept).latest(1).execute()
-                    except:
-                        pass
-
-                    # Strategy 2: Fall back to annual if needed
-                    if not query_result or len(query_result) == 0:
-                        try:
-                            query_result = facts.query().by_concept(concept).annual().latest(1).execute()
-                        except:
-                            pass
-
-                    # Strategy 3: Try quarterly
-                    if not query_result or len(query_result) == 0:
-                        try:
-                            query_result = facts.query().by_concept(concept).quarterly().latest(1).execute()
-                        except:
-                            pass
+                    # .latest() returns a list directly, no .execute() needed
+                    query_result = facts.query().by_concept(concept).latest(1)
 
                     if query_result and len(query_result) > 0:
                         val = self._to_float(query_result[0].numeric_value)

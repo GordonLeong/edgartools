@@ -244,42 +244,17 @@ class MetricsDebugger:
                     continue
 
                 try:
-                    # Try multiple query strategies
-                    result = None
-                    query_type = None
-
-                    # Strategy 1: Latest without filtering by frequency
-                    try:
-                        result = facts.query().by_concept(concept).latest(1).execute()
-                        query_type = "latest (any frequency)"
-                    except:
-                        pass
-
-                    # Strategy 2: Try annual if latest didn't work
-                    if not result or len(result) == 0:
-                        try:
-                            result = facts.query().by_concept(concept).annual().latest(1).execute()
-                            query_type = "annual"
-                        except:
-                            pass
-
-                    # Strategy 3: Try quarterly
-                    if not result or len(result) == 0:
-                        try:
-                            result = facts.query().by_concept(concept).quarterly().latest(1).execute()
-                            query_type = "quarterly"
-                        except:
-                            pass
+                    # .latest() returns a list directly, no .execute() needed
+                    result = facts.query().by_concept(concept).latest(1)
 
                     if result and len(result) > 0:
                         fact = result[0]
                         value_str = f"{fact.numeric_value:,.0f}" if fact.numeric_value else "N/A"
-                        date_str = fact.end_date if hasattr(fact, 'end_date') else "N/A"
+                        date_str = str(fact.end_date) if hasattr(fact, 'end_date') else "N/A"
 
                         print(f"📌 {concept}")
                         print(f"   └─ Value: {value_str}")
                         print(f"   └─ Date: {date_str}")
-                        print(f"   └─ Query: {query_type}")
                         print()
                         facts_found += 1
                 except Exception as e:
