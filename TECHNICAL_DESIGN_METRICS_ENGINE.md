@@ -1,24 +1,33 @@
 # Financial Statements & Metrics Engine - Technical Design
 
 ## Table of Contents
+
 1. [Introduction](#introduction)
 2. [EdgarTools Library Overview](#edgartools-library-overview)
 3. [Solution Design](#solution-design)
-4. [Pipeline Architecture](#pipeline-architecture)
-5. [Database Schema](#database-schema)
-6. [Additional Considerations](#additional-considerations)
-7. [Future Improvements & Roadmap](#future-improvements--roadmap)
+4. [Current Useful Baseline (Keep + Improve)](#current-useful-baseline-keep--improve)
+5. [Pipeline Architecture](#pipeline-architecture)
+6. [Database Schema](#database-schema)
+7. [Code Deletion Plan (Out of Scope: html_ingest)](#code-deletion-plan-out-of-scope-html_ingest)
+8. [Debugging and DLQ Operations](#debugging-and-dlq-operations)
+9. [Additional Considerations](#additional-considerations)
+10. [Pipeline Deployment Workstreams](#pipeline-deployment-workstreams)
+11. [Execution Backlog (Now / Next / Later)](#execution-backlog-now--next--later)
+12. [Future Improvements & Roadmap](#future-improvements--roadmap)
 
 ---
 
-## Introduction
+
 
 ### Project Overview
+
 Build a financial data platform that provides:
+
 1. **Comparable Financial Statements** - Income Statement, Balance Sheet, Cash Flow Statement with TTM/Quarterly/Annual views
 2. **Metrics Engine** - Key fundamental metrics and KPIs extracted from XBRL data, stored in database, rendered with sparklines
 
 ### Architecture Pattern
+
 ```
 ┌─────────────────────────────────────────────────┐
 │ Python Pipeline (EdgarTools)                    │
@@ -43,6 +52,7 @@ Build a financial data platform that provides:
 ```
 
 ### Key Design Principles
+
 - **Immutable Data**: SEC filings never change after submission
 - **Pre-computation**: Calculate TTM and metrics in pipeline, not on-demand
 - **Separation of Concerns**: Python for XBRL parsing, SvelteKit for presentation
@@ -53,6 +63,7 @@ Build a financial data platform that provides:
 ## EdgarTools Library Overview
 
 ### Installation & Setup
+
 ```bash
 pip install edgartools
 ```
@@ -67,6 +78,7 @@ set_identity("Your Name your.email@company.com")
 ### Core Concepts
 
 #### 1. Company - Primary Entry Point
+
 ```python
 from edgar import Company
 
@@ -88,6 +100,7 @@ latest_10k = filings.latest(1)
 ```
 
 #### 2. Filing - Individual SEC Filing
+
 ```python
 from edgar import Filing
 
@@ -108,6 +121,7 @@ attachments = filing.attachments  # All attachments
 ```
 
 #### 3. XBRL - Financial Data Parser
+
 ```python
 # Parse XBRL from filing
 xbrl = filing.xbrl()
@@ -139,6 +153,7 @@ df = income_stmt.to_dataframe()  # Returns pandas DataFrame
 ### Key Features for Our Use Case
 
 #### Feature 1: Get Statements with Structure Preserved
+
 ```python
 # The statement preserves the XBRL presentation order
 income_stmt = xbrl.get_income_statement()
@@ -155,6 +170,7 @@ df = income_stmt.to_dataframe()
 ```
 
 #### Feature 2: Filter Facts by Statement Type/Role
+
 ```python
 # Get ALL facts
 all_facts = xbrl.facts
@@ -179,6 +195,7 @@ filtered = (xbrl.facts.query()
 ```
 
 #### Feature 3: Get Segment/Dimensional Data
+
 ```python
 # Facts with dimensions (segments, products, geographies)
 segment_facts = xbrl.facts.query().to_dataframe()
@@ -194,6 +211,7 @@ dimensional_facts = segment_facts[segment_facts['dimensions'].notna()]
 ```
 
 #### Feature 4: Access Multiple Periods
+
 ```python
 # Get historical filings
 filings_10q = company.get_filings(form='10-Q').latest(8)  # Last 8 quarters
@@ -209,6 +227,7 @@ for filing in filings_10q:
 ```
 
 #### Feature 5: Fact-Level Data Access
+
 ```python
 # Get specific fact value
 facts_df = xbrl.facts.query().to_dataframe()
@@ -227,6 +246,7 @@ facts_df = xbrl.facts.query().to_dataframe()
 ```
 
 ### Complete Example: Extract Full Income Statement
+
 ```python
 from edgar import Company, set_identity
 import pandas as pd
@@ -271,19 +291,19 @@ statement_data = {
 
 ### Important Methods Reference
 
-| Method | Returns | Use Case |
-|--------|---------|----------|
-| `Company.get_filings(form='10-K')` | Filings list | Get historical filings |
-| `filing.xbrl()` | XBRL object | Parse financial data |
-| `xbrl.statements` | List[Dict] | Get all available statements/roles |
-| `xbrl.get_income_statement()` | Statement | Get income statement |
-| `xbrl.get_balance_sheet()` | Statement | Get balance sheet |
-| `xbrl.get_cash_flow_statement()` | Statement | Get cash flow statement |
-| `statement.to_dataframe()` | DataFrame | Convert to pandas for processing |
-| `xbrl.facts.query()` | FactQuery | Start fact filtering |
-| `query.by_statement_type(type)` | FactQuery | Filter facts by statement |
-| `query.by_concept(pattern)` | FactQuery | Filter facts by concept name |
-| `query.to_dataframe()` | DataFrame | Get filtered facts as DataFrame |
+| Method                             | Returns      | Use Case                           |
+| ---------------------------------- | ------------ | ---------------------------------- |
+| `Company.get_filings(form='10-K')` | Filings list | Get historical filings             |
+| `filing.xbrl()`                    | XBRL object  | Parse financial data               |
+| `xbrl.statements`                  | List[Dict]   | Get all available statements/roles |
+| `xbrl.get_income_statement()`      | Statement    | Get income statement               |
+| `xbrl.get_balance_sheet()`         | Statement    | Get balance sheet                  |
+| `xbrl.get_cash_flow_statement()`   | Statement    | Get cash flow statement            |
+| `statement.to_dataframe()`         | DataFrame    | Convert to pandas for processing   |
+| `xbrl.facts.query()`               | FactQuery    | Start fact filtering               |
+| `query.by_statement_type(type)`    | FactQuery    | Filter facts by statement          |
+| `query.by_concept(pattern)`        | FactQuery    | Filter facts by concept name       |
+| `query.to_dataframe()`             | DataFrame    | Get filtered facts as DataFrame    |
 
 ---
 
@@ -292,6 +312,7 @@ statement_data = {
 ### Feature 1: Comparable Financial Statements
 
 #### Requirements
+
 - Display Income Statement, Balance Sheet, Cash Flow Statement
 - Support **TTM** (Trailing Twelve Months), **Quarterly**, and **Annual** views
 - Enable **cross-company comparison** (AAPL vs MSFT vs GOOGL)
@@ -300,12 +321,14 @@ statement_data = {
 #### Design Approach
 
 **Storage Strategy:**
+
 - Store full rendered statements as JSONB in database
 - Preserve line item order from XBRL presentation linkbase
 - Store multiple periods per company
 - Pre-calculate TTM values
 
 **Data Flow:**
+
 ```
 SEC Filing → EdgarTools XBRL Parser → Statement Object → Database (JSONB)
                                                               ↓
@@ -315,44 +338,46 @@ SEC Filing → EdgarTools XBRL Parser → Statement Object → Database (JSONB)
 ```
 
 **Statement Structure (Stored in DB):**
+
 ```json
 {
-  "company_id": "AAPL",
-  "statement_type": "IncomeStatement",
-  "period_end_date": "2024-09-28",
-  "period_type": "Q",
-  "fiscal_year": 2024,
-  "fiscal_quarter": 4,
-  "line_items": [
-    {
-      "label": "Net sales",
-      "concept": "us-gaap:Revenues",
-      "value": 94930000000,
-      "depth": 0,
-      "order": 1.0,
-      "is_abstract": false
-    },
-    {
-      "label": "Cost of sales",
-      "concept": "us-gaap:CostOfRevenue",
-      "value": 52836000000,
-      "depth": 1,
-      "order": 2.0,
-      "is_abstract": false
-    },
-    {
-      "label": "Gross margin",
-      "concept": "us-gaap:GrossProfit",
-      "value": 42094000000,
-      "depth": 0,
-      "order": 3.0,
-      "is_abstract": false
-    }
-  ]
+	"company_id": "AAPL",
+	"statement_type": "IncomeStatement",
+	"period_end_date": "2024-09-28",
+	"period_type": "Q",
+	"fiscal_year": 2024,
+	"fiscal_quarter": 4,
+	"line_items": [
+		{
+			"label": "Net sales",
+			"concept": "us-gaap:Revenues",
+			"value": 94930000000,
+			"depth": 0,
+			"order": 1.0,
+			"is_abstract": false
+		},
+		{
+			"label": "Cost of sales",
+			"concept": "us-gaap:CostOfRevenue",
+			"value": 52836000000,
+			"depth": 1,
+			"order": 2.0,
+			"is_abstract": false
+		},
+		{
+			"label": "Gross margin",
+			"concept": "us-gaap:GrossProfit",
+			"value": 42094000000,
+			"depth": 0,
+			"order": 3.0,
+			"is_abstract": false
+		}
+	]
 }
 ```
 
 **TTM Calculation:**
+
 ```
 TTM (Q4 2024) = Q4 2024 + Q3 2024 + Q2 2024 + Q1 2024
 
@@ -363,6 +388,7 @@ For each line item:
 ```
 
 **Cross-Company Comparison Strategy:**
+
 ```
 1. Fetch statements for all companies
 2. Align periods (match quarter end dates within tolerance)
@@ -373,6 +399,7 @@ For each line item:
 ### Feature 2: Metrics Engine
 
 #### Requirements
+
 - Extract **specific key fundamental metrics** from XBRL
 - Support user-selectable metrics catalog
 - Store in database for fast retrieval
@@ -464,6 +491,7 @@ METRICS_CATALOG = {
 ```
 
 **Extraction Strategy:**
+
 ```python
 def extract_metric(xbrl, metric_config):
     """Extract a single metric from XBRL"""
@@ -515,6 +543,19 @@ if not metric_result['found']:
         'timestamp': datetime.now()
     })
 ```
+
+---
+
+## Current Useful Baseline (Keep + Improve)
+
+The existing codebase already has useful assets that should be retained and iterated on while deploying the full pipeline:
+
+1. Keep and improve `data-pipeline/data-engine/metrics-engine/metrics_debugger.py` as the primary debugging CLI.
+2. Keep and improve `data-pipeline/data-engine/metrics-engine/metrics_extractor.py` for phase-1 metric extraction logic.
+3. Refactor `data-pipeline/data-engine/metrics-engine/financial-highlights.py` into production pipeline modules (not an ad-hoc script).
+4. Reuse `src/lib/config/metricDefinitions.ts` as the phase-1 supported metric contract.
+5. Reuse `src/lib/services/metricCalculator.ts` for derived metric and growth parity.
+6. Keep provider abstraction in `src/lib/services/metricDataProvider.ts` and replace backend incrementally.
 
 ---
 
@@ -1060,14 +1101,94 @@ WHERE company_id IN ('AAPL', 'MSFT', 'GOOGL')
 
 ---
 
+## Code Deletion Plan (Out of Scope: html_ingest)
+
+The pipeline cleanup must remove non-essential files while explicitly keeping `data-pipeline/html_ingest/**` untouched.
+
+1. Maintain explicit delete candidates in `data-pipeline/data-engine/metrics-engine/metrics-engine-plan/delete_list.md`.
+2. Do not touch `data-pipeline/html_ingest/**`.
+3. Proposed delete candidates:
+   - `data-pipeline/experiments/add_stamp_backup.py`
+   - `data-pipeline/experiments/comptest_v2.py`
+   - `data-pipeline/experiments/debugallfacts.py`
+   - `data-pipeline/experiments/debugfacts.py`
+   - `data-pipeline/experiments/debugfcf.py`
+   - `data-pipeline/experiments/debugger.py`
+   - `data-pipeline/experiments/unified_debug.py`
+   - `data-pipeline/experiments/financial_metrics_scaled.csv`
+   - `data-pipeline/data-engine/metrics-engine/financial_metrics_scaled.csv`
+   - All `__pycache__/**` and `.DS_Store` under `data-pipeline/experiments/**` and `data-pipeline/data-engine/**`
+4. Keep `data-pipeline/experiments/test_comprehensive_extractor.py` only if migrated into main test tree; otherwise remove after extracting useful cases.
+
+---
+
+## Debugging and DLQ Operations
+
+The pipeline should treat debugging and DLQ handling as first-class operations.
+
+### Failure Record Contract
+
+Each failure record should include:
+
+- `run_id`
+- `ticker`
+- `form`
+- `filing_accession`
+- `report_period`
+- `statement_type`
+- `metric_id`
+- `failure_type`
+- `attempted_labels`
+- `attempted_concepts`
+- `raw_context`
+- `severity`
+- `status`
+- `first_seen_at`
+- `last_seen_at`
+- `resolution_note`
+
+### Debugger Command Additions
+
+Extend `metrics_debugger.py` with:
+
+- `coverage report` for statement/metric completeness
+- `integrity check` for accounting and period consistency
+- `dlq list`
+- `dlq show`
+- `dlq replay`
+- `run diff` for comparing pipeline runs
+
+### Mandatory Validation Checks
+
+- Balance sheet equation check
+- FCF reconciliation (`operating_cash_flow - abs(capex)`)
+- Duplicate accession-period conflicts
+- Period continuity gaps
+- Sign convention sanity checks
+- Shares and per-share sanity checks
+
+### Debug Artifact Outputs
+
+Emit JSONL artifacts per run for:
+
+- statement extraction traces
+- metric extraction traces
+- failed lookups and fallback attempts
+- validation outcomes
+- DLQ entries and replay results
+
+---
+
 ## Additional Considerations
 
 ### 1. What EdgarTools CAN'T Help With
 
 #### A. TTM Calculation
+
 **Problem:** XBRL only contains quarterly and annual data. TTM must be calculated.
 
 **Solution:**
+
 ```python
 # Implemented in pipeline
 def calculate_ttm(ticker, statement_type):
@@ -1078,21 +1199,26 @@ def calculate_ttm(ticker, statement_type):
 ```
 
 #### B. Concept Standardization/Mapping
+
 **Problem:** Companies use different XBRL concepts for the same line item.
 
 **Current State in EdgarTools:**
+
 - EdgarTools has basic standardization in `/edgar/xbrl/standardization/core.py`
 - Has label mapping for common concepts
 - NOT comprehensive for all metrics
 
 **Solution:**
+
 1. **Extract EdgarTools standardization as starting point:**
+
    ```bash
    # Copy from edgartools codebase
    cp edgar/xbrl/standardization/concept_mappings.json ./our_repo/
    ```
 
 2. **Build our own comprehensive mapping:**
+
    ```python
    # concept_mappings.json
    {
@@ -1114,6 +1240,7 @@ def calculate_ttm(ticker, statement_type):
    ```
 
 3. **Use Dead Letter Queue to discover missing mappings:**
+
    ```sql
    -- Query DLQ to find patterns
    SELECT
@@ -1133,33 +1260,39 @@ def calculate_ttm(ticker, statement_type):
    - Reprocess failed extractions
 
 #### C. Company-Specific Line Item Labels
+
 **Problem:** Each company names line items differently in their presentation.
 
 **Example:**
+
 - Apple: "Net sales"
 - Microsoft: "Total revenue"
 - Google: "Revenues"
-All map to: `us-gaap:Revenues`
+  All map to: `us-gaap:Revenues`
 
 **Solution:**
 Store both original label AND standardized concept:
+
 ```json
 {
-  "label": "Net sales",           // Company's original label
-  "concept": "us-gaap:Revenues",  // Standardized concept
-  "standardized_label": "Revenue" // Our normalized label for comparison
+	"label": "Net sales", // Company's original label
+	"concept": "us-gaap:Revenues", // Standardized concept
+	"standardized_label": "Revenue" // Our normalized label for comparison
 }
 ```
 
 #### D. Period Alignment for Cross-Company Comparison
+
 **Problem:** Companies have different fiscal year ends.
 
 **Example:**
+
 - Apple: FY ends Sept 30 (Q4 ends ~Sept 28)
 - Microsoft: FY ends June 30 (Q4 ends ~June 30)
 - Calendar companies: Q4 ends Dec 31
 
 **Solution:**
+
 ```python
 def align_periods(companies, tolerance_days=45):
     """
@@ -1182,9 +1315,11 @@ def align_periods(companies, tolerance_days=45):
 ```
 
 #### E. Derived Metrics
+
 **Problem:** Many important metrics aren't in XBRL directly (ratios, margins, growth rates).
 
 **Solution:** Calculate in pipeline after extracting base metrics:
+
 ```python
 DERIVED_METRICS = {
     'gross_margin': 'gross_profit / revenue * 100',
@@ -1206,6 +1341,7 @@ def calculate_derived_metric(formula, metric_values):
 ### 2. Error Handling & Data Quality
 
 #### A. Missing Data Handling
+
 ```python
 # Store NULL values explicitly
 # Track data quality metrics
@@ -1219,6 +1355,7 @@ data_quality_metrics = {
 ```
 
 #### B. XBRL Parse Failures
+
 ```python
 try:
     xbrl = filing.xbrl()
@@ -1235,6 +1372,7 @@ except Exception as e:
 ```
 
 #### C. Validation Rules
+
 ```python
 # Sanity checks on extracted data
 def validate_statement(statement_data):
@@ -1269,6 +1407,7 @@ def validate_statement(statement_data):
 ### 3. Performance Optimizations
 
 #### A. Batch Processing
+
 ```python
 # Process multiple companies in parallel
 from concurrent.futures import ThreadPoolExecutor
@@ -1279,6 +1418,7 @@ with ThreadPoolExecutor(max_workers=5) as executor:
 ```
 
 #### B. Caching
+
 ```python
 # Cache parsed XBRL objects to avoid re-parsing
 from functools import lru_cache
@@ -1290,6 +1430,7 @@ def get_xbrl_cached(accession_number):
 ```
 
 #### C. Incremental Processing
+
 ```python
 # Only process new filings
 def get_unprocessed_filings(ticker):
@@ -1303,18 +1444,113 @@ def get_unprocessed_filings(ticker):
     return [f for f in all_filings if f.accession_number not in processed_accessions]
 ```
 
+### 4. Foreseeable Data Gaps and Integrity Risks (Additions)
+
+1. Enum mismatch bug: `"Quarterly"` is currently written while `period_enum` expects `Q1..Q4`.
+   - Reference: `data-pipeline/data-engine/metrics-engine/financial-highlights.py` (`period="Quarterly"`)
+   - Reference: `src/migrations/011_period_enum_financial_statements.sql` (`period_enum`)
+2. Fiscal quarter formula bug in current ingestion logic.
+   - Reference: `data-pipeline/data-engine/metrics-engine/financial-highlights.py` (`fiscal_quarter =(month)-1//3+1`)
+3. SQL migration syntax issue (`//` comment in SQL).
+   - Reference: `src/migrations/010_create_companies_table.sql`
+4. Period column selection can include non-period columns in stitched DataFrames.
+   - Reference: `data-pipeline/data-engine/metrics-engine/financial-highlights.py` (`period_columns = [col for col in is_df.columns if col != "label"]`)
+5. `filing_accession` is not persisted in the current ingestion write path despite schema support.
+   - Reference: `src/migrations/011_period_enum_financial_statements.sql` (`filing_accession text`)
+6. Provider period label is hardcoded to `Q1` in mapping path.
+   - Reference: `src/lib/services/metricDataProvider.ts` (`const periodLabel = period === 'quarterly' ? ('Q1' as const) : ('Annual' as const);`)
+7. App still defaults to HuggingFace provider while pipeline provider is pending.
+   - Reference: `src/lib/services/metricDataProvider.ts` (`let currentProvider: MetricDataProvider = new HuggingFaceProvider();`)
+8. Formula parity risk between extractor and frontend calculator if derived metrics are computed in two places without shared logic.
+   - Reference: `data-pipeline/data-engine/metrics-engine/metrics_extractor.py`
+   - Reference: `src/lib/services/metricCalculator.ts`
+
+---
+
+## Pipeline Deployment Workstreams
+
+Deploying the full pipeline requires parallel workstreams with clear interfaces:
+
+1. Workstream A: Schema and storage contracts
+2. Workstream B: Discovery and processed-filing ledger
+3. Workstream C: Statement extraction and normalization
+4. Workstream D: Metrics extraction and derived metric parity
+5. Workstream E: TTM computation and persistence
+6. Workstream F: DLQ and integrity validation
+7. Workstream G: On-demand run orchestration and CLI
+8. Workstream H: Scheduled execution and run monitoring
+9. Workstream I: Serving layer (JSONL first, DB next)
+10. Workstream J: Provider cutover and HuggingFace deprecation
+
+---
+
+## Execution Backlog (Now / Next / Later)
+
+### Now
+
+- [ ] `PIPE-NOW-BUG-01` Fix SQL comment syntax in `src/migrations/010_create_companies_table.sql`. (1h)
+- [ ] `PIPE-NOW-BUG-02` Fix period enum writes to `Q1..Q4` in `data-pipeline/data-engine/metrics-engine/financial-highlights.py`. (1h)
+- [ ] `PIPE-NOW-BUG-03` Fix fiscal quarter math in `data-pipeline/data-engine/metrics-engine/financial-highlights.py`. (1h)
+- [ ] `PIPE-NOW-BUG-04` Fix period-column filtering in `data-pipeline/data-engine/metrics-engine/financial-highlights.py`. (1h)
+- [ ] `PIPE-NOW-BUG-05` Persist `filing_accession` on `financial_statements` writes. (1h)
+- [ ] `PIPE-NOW-BUG-06` Fix hardcoded quarter label mapping in `src/lib/services/metricDataProvider.ts`. (1h)
+- [ ] `PIPE-NOW-BUG-07` Align derived metric formulas with `src/lib/services/metricCalculator.ts` for phase-1 IDs. (1.5h)
+- [ ] `PIPE-NOW-01` Create `delete_list.md` with approved remove candidates and explicit `html_ingest` exclusion. (1h)
+- [ ] `PIPE-NOW-02` Remove approved non-essential experiment/generated files from delete list. (1h)
+- [ ] `PIPE-NOW-03` Split current ingestion script into modules: `config`, `discovery`, `extract_statements`, `store`, `runner`. (2h)
+- [ ] `PIPE-NOW-04` Add `processed_filings` ledger table or JSONL ledger with idempotent checks. (1.5h)
+- [ ] `PIPE-NOW-05` Add on-demand statement pipeline CLI: `run --ticker --form --limit --mode`. (1.5h)
+- [ ] `PIPE-NOW-06` Implement normalized statement JSON output contract and persist to JSONL local store. (1.5h)
+- [ ] `PIPE-NOW-07` Add integrity checks for statements and emit structured failures. (1.5h)
+- [ ] `PIPE-NOW-08` Implement on-demand key-metrics extraction run (same filing set as statements). (1.5h)
+- [ ] `PIPE-NOW-09` Persist phase-1 key metrics from `src/lib/config/metricDefinitions.ts` to JSONL + optional DB target. (1.5h)
+- [ ] `PIPE-NOW-10` Add TTM calculator for phase-1 statement and metric fields from last 4 quarters. (2h)
+- [ ] `PIPE-NOW-11` Add debugger subcommands for `coverage report` and `integrity check`. (1.5h)
+- [ ] `PIPE-NOW-12` Add minimal runbook docs for on-demand run, outputs, and failure triage. (1h)
+- [ ] `PIPE-NOW-13` Add smoke tests: one ticker 10-Q + 10-K end-to-end run produces statement + metric artifacts. (2h)
+
+### Next
+
+- [ ] `PIPE-NEXT-01` Create full planned DB tables: `statements`, `xbrl_facts`, `company_metrics`, `dead_letter_queue`, `processing_log`, `metrics_catalog`. (2h)
+- [ ] `PIPE-NEXT-02` Implement statement JSONB writer (`statements.line_items`) and role/metadata persistence. (1.5h)
+- [ ] `PIPE-NEXT-03` Implement `xbrl_facts` writer with dimensional facts support. (2h)
+- [ ] `PIPE-NEXT-04` Implement `company_metrics` writer with concept traceability. (1.5h)
+- [ ] `PIPE-NEXT-05` Implement DLQ writer + status lifecycle updates (`open`, `replayed`, `resolved`). (1.5h)
+- [ ] `PIPE-NEXT-06` Implement run log writer for started/completed/failed runs. (1h)
+- [ ] `PIPE-NEXT-07` Build metrics catalog bootstrap from phase-1 metric IDs and extraction mappings. (1.5h)
+- [ ] `PIPE-NEXT-08` Add incremental discovery pass for unprocessed filings by accession. (1.5h)
+- [ ] `PIPE-NEXT-09` Add retry policy and replay mechanism for failed filings only. (1.5h)
+- [ ] `PIPE-NEXT-10` Add scheduled runner (`cron`/APScheduler) with lock to avoid concurrent runs. (1.5h)
+- [ ] `PIPE-NEXT-11` Implement `EdgarPipelineProvider` in `src/lib/services/metricDataProvider.ts`, local JSONL-first read path. (2h)
+- [ ] `PIPE-NEXT-12` Add route-level fallback order: pipeline local -> pipeline DB -> HuggingFace adapter. (1.5h)
+- [ ] `PIPE-NEXT-13` Add parity-check job comparing HF adapter vs pipeline for phase-1 metrics on pilot ticker set. (2h)
+- [ ] `PIPE-NEXT-14` Add deployment packaging (`pyproject` entrypoint + env var validation + health command). (1.5h)
+- [ ] `PIPE-NEXT-15` Add operational docs: runbook, rollback, and cutover criteria for provider default switch. (1.5h)
+
+### Later
+
+1. Make pipeline provider default across app after parity and reliability thresholds are met.
+2. Deprecate and remove HuggingFace adapter once fallback is no longer required.
+3. Build DLQ triage UI and review workflow.
+4. Expand supported metrics beyond phase 1 in controlled batches.
+5. Add advanced segment/geography metrics and cross-company alignment enhancements.
+6. Add quality score dashboards and alerting for completeness/integrity drift.
+7. Optimize scaling (parallelism, caching, queue workers) after baseline reliability is stable.
+
 ---
 
 ## Future Improvements & Roadmap
 
-### Phase 1: MVP (Months 1-2)
+### Phase 1: MVP 
+
 - ✅ Extract 3 core statements (Income, Balance, Cash Flow)
 - ✅ Extract ~20 key metrics (revenue, net income, assets, debt, etc.)
 - ✅ Calculate TTM
 - ✅ Store in database
 - ✅ Basic SvelteKit UI to display statements
 
-### Phase 2: Enhanced Metrics (Months 3-4)
+### Phase 2: Enhanced Metrics 
+
 - 📊 Expand to ~50 metrics
 - 📊 Add derived metrics (margins, ratios)
 - 📊 Segment/product revenue breakdown
@@ -1322,14 +1558,16 @@ def get_unprocessed_filings(ticker):
 - 📊 Dead letter queue UI for manual review
 - 📊 Concept mapping expansion
 
-### Phase 3: Advanced Features (Months 5-6)
+### Phase 3: Advanced Features 
+
 - 🎯 Peer comparison (automatic industry grouping)
 - 🎯 Historical trend analysis
 - 🎯 Anomaly detection (unusual metric changes)
 - 🎯 Custom metric builder (user-defined formulas)
 - 🎯 Metric alerts (notify when metric crosses threshold)
 
-### Phase 4: AI-Enhanced (Months 7-9)
+### Phase 4: AI-Enhanced 
+
 - 🤖 LLM-based concept mapping discovery
 - 🤖 Automatic DLQ resolution suggestions
 - 🤖 Natural language queries ("Show me Apple's revenue growth vs Microsoft")
@@ -1339,11 +1577,13 @@ def get_unprocessed_filings(ticker):
 ### Specific Enhancement Ideas
 
 #### 1. Smart Concept Mapping Discovery
+
 ```python
 # Use LLM to suggest mappings
 def suggest_concept_mapping(metric_name, attempted_concepts, all_available_concepts):
     """
     Use GPT-4 to suggest which concept matches the metric we're looking for
+    Or potentially traditional ML in future
     """
     prompt = f"""
     We're trying to extract the metric "{metric_name}" from a 10-K filing.
@@ -1366,6 +1606,7 @@ def suggest_concept_mapping(metric_name, attempted_concepts, all_available_conce
 ```
 
 #### 2. Automated Quality Checks
+
 ```python
 # Use calculation linkbase for validation
 def validate_using_calculation_linkbase(xbrl, statement_type):
@@ -1401,6 +1642,7 @@ def validate_using_calculation_linkbase(xbrl, statement_type):
 ```
 
 #### 3. Metric Importance Scoring
+
 ```python
 # Track which metrics users actually use
 CREATE TABLE metric_usage (
@@ -1415,6 +1657,7 @@ CREATE TABLE metric_usage (
 ```
 
 #### 4. Cross-Filing Consistency Checks
+
 ```python
 # Validate that values are consistent across related filings
 def check_cross_filing_consistency(ticker, metric_name):
@@ -1432,6 +1675,7 @@ def check_cross_filing_consistency(ticker, metric_name):
 ```
 
 #### 5. Industry Benchmarking
+
 ```python
 # Automatic peer group identification
 def get_peer_companies(ticker):
@@ -1470,15 +1714,15 @@ def get_industry_percentiles(metric_name, industry_sic):
 
 ### Metrics Catalog Expansion Plan
 
-| Category | Current | Phase 2 | Phase 3 | Phase 4 |
-|----------|---------|---------|---------|---------|
-| Income Statement | 10 | 20 | 30 | 50 |
-| Balance Sheet | 8 | 15 | 25 | 40 |
-| Cash Flow | 6 | 12 | 20 | 35 |
-| Ratios | 5 | 15 | 30 | 50 |
-| Segment | 2 | 10 | 20 | 30 |
-| Per-Share | 4 | 10 | 15 | 25 |
-| **Total** | **35** | **82** | **140** | **230** |
+| Category         | Current | Phase 2 | Phase 3 | Phase 4 |
+| ---------------- | ------- | ------- | ------- | ------- |
+| Income Statement | 10      | 20      | 30      | 50      |
+| Balance Sheet    | 8       | 15      | 25      | 40      |
+| Cash Flow        | 6       | 12      | 20      | 35      |
+| Ratios           | 5       | 15      | 30      | 50      |
+| Segment          | 2       | 10      | 20      | 30      |
+| Per-Share        | 4       | 10      | 15      | 25      |
+| **Total**        | **35**  | **82**  | **140** | **230** |
 
 ### Technology Stack Evolution
 
@@ -1556,12 +1800,13 @@ CASH_FLOW_CONCEPTS = {
 // routes/api/statements/[ticker]/+server.ts
 
 export async function GET({ params, url }) {
-  const { ticker } = params;
-  const statementType = url.searchParams.get('type') || 'IncomeStatement';
-  const periodType = url.searchParams.get('period') || 'TTM';
+	const { ticker } = params;
+	const statementType = url.searchParams.get('type') || 'IncomeStatement';
+	const periodType = url.searchParams.get('period') || 'TTM';
 
-  // Query database
-  const statement = await db.query(`
+	// Query database
+	const statement = await db.query(
+		`
     SELECT
       period_end_date,
       line_items,
@@ -1573,19 +1818,22 @@ export async function GET({ params, url }) {
       AND period_type = $3
     ORDER BY period_end_date DESC
     LIMIT 1
-  `, [ticker, statementType, periodType]);
+  `,
+		[ticker, statementType, periodType]
+	);
 
-  return json(statement);
+	return json(statement);
 }
 
 // routes/api/metrics/[ticker]/+server.ts
 
 export async function GET({ params, url }) {
-  const { ticker } = params;
-  const metricNames = url.searchParams.get('metrics')?.split(',') || [];
-  const periods = parseInt(url.searchParams.get('periods') || '12');
+	const { ticker } = params;
+	const metricNames = url.searchParams.get('metrics')?.split(',') || [];
+	const periods = parseInt(url.searchParams.get('periods') || '12');
 
-  const metrics = await db.query(`
+	const metrics = await db.query(
+		`
     SELECT
       metric_name,
       display_name,
@@ -1597,9 +1845,11 @@ export async function GET({ params, url }) {
       AND metric_name = ANY($2)
     ORDER BY period_end_date DESC
     LIMIT $3
-  `, [ticker, metricNames, periods]);
+  `,
+		[ticker, metricNames, periods]
+	);
 
-  return json(metrics);
+	return json(metrics);
 }
 ```
 
