@@ -22,13 +22,10 @@ logger = logging.getLogger(__name__)
 
 @tool(
     name="edgar_screen",
-    description="""Discover companies by industry, exchange, or state. Returns matching
-companies from SEC reference data — instant, no API calls.
-
-Combine filters to narrow results (e.g., software companies on NYSE in Delaware).
+    description="""Use this to discover or screen companies by industry, exchange, or state. Returns matching companies from SEC reference data — instant results, no API calls. Combine filters to narrow results.
 
 Examples:
-- By industry keyword: industry="software"
+- By industry: industry="software"
 - By SIC code: sic=2834 (pharmaceutical)
 - By exchange: exchange="NYSE"
 - By state: state="DE" (Delaware)
@@ -98,8 +95,10 @@ async def edgar_screen(
 
         # Apply exchange filter
         if exchange:
-            if df is not None:
+            if df is not None and 'exchange' in df.columns:
                 df = df[df['exchange'] == exchange]
+            elif df is not None:
+                pass  # DataFrame lacks exchange column; skip filter
             else:
                 df = get_companies_by_exchanges(exchange)
 
@@ -108,6 +107,11 @@ async def edgar_screen(
             if df is not None:
                 if 'state_of_incorporation' in df.columns:
                     df = df[df['state_of_incorporation'] == state.upper()]
+                else:
+                    # df lacks state column (e.g., exchange-only query) — intersect with state data
+                    state_df = get_companies_by_state(state.upper())
+                    if state_df is not None and not state_df.empty:
+                        df = df[df['cik'].isin(state_df['cik'])]
             else:
                 df = get_companies_by_state(state.upper())
 

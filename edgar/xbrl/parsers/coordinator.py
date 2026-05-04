@@ -51,6 +51,9 @@ class XBRLParser:
         self.presentation_roles: Dict[str, Dict[str, Any]] = {}
         self.presentation_trees: Dict[str, PresentationTree] = {}
 
+        # Role type definitions from schema (human-readable definitions)
+        self.role_types: Dict[str, Dict[str, Any]] = {}
+
         # Calculation structures
         self.calculation_roles: Dict[str, Dict[str, Any]] = {}
         self.calculation_trees: Dict[str, CalculationTree] = {}
@@ -61,8 +64,22 @@ class XBRLParser:
         self.axes: Dict[str, Axis] = {}
         self.domains: Dict[str, Domain] = {}
 
-        # Entity information
-        self.entity_info: Dict[str, Any] = {}
+        # Entity information — always pre-populate keys so callers never get KeyError
+        self.entity_info: Dict[str, Any] = {
+            'entity_name': None,
+            'ticker': None,
+            'identifier': None,
+            'document_type': None,
+            'reporting_end_date': None,
+            'document_period_end_date': None,
+            'fiscal_year': None,
+            'fiscal_period': None,
+            'fiscal_year_end_month': None,
+            'fiscal_year_end_day': None,
+            'annual_report': False,
+            'quarterly_report': False,
+            'amendment': False,
+        }
         self.dei_facts: Dict[str, Fact] = {}
 
         # Reporting periods
@@ -78,7 +95,8 @@ class XBRLParser:
         """Initialize all component parsers with shared data structures."""
         # Create component parsers with references to shared data structures
         self.schema_parser = SchemaParser(
-            element_catalog=self.element_catalog
+            element_catalog=self.element_catalog,
+            role_types=self.role_types
         )
 
         self.labels_parser = LabelsParser(
@@ -88,7 +106,8 @@ class XBRLParser:
         self.presentation_parser = PresentationParser(
             presentation_roles=self.presentation_roles,
             presentation_trees=self.presentation_trees,
-            element_catalog=self.element_catalog
+            element_catalog=self.element_catalog,
+            role_types=self.role_types
         )
 
         self.calculation_parser = CalculationParser(

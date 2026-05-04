@@ -65,6 +65,8 @@ dynamic = ["version"]
 ai = [
     "mcp>=1.12.3",          # Model Context Protocol
     "tiktoken>=0.10.0",     # Token counting for OpenAI models
+    "starlette>=0.36.0",    # ASGI framework for HTTP transport
+    "uvicorn>=0.27.0",      # ASGI server for HTTP transport
 ]
 
 ai-dev = [
@@ -207,6 +209,7 @@ test-ci-all = "pytest --cov --cov-report=xml -m 'not regression' --ignore=tests/
 test-regression = "pytest --cov --cov-report=xml -m regression {args}"
 
 # Other test categories  
+test-eval = "pytest tests/test_evaluation_offline.py {args}"
 test-batch = "pytest scripts/batch/ -m 'batch' {args}"
 test-reproduction = "pytest tests/issues/reproductions/ -m 'reproduction' {args}"
 test-full = "pytest --ignore=tests/perf {args}"
@@ -232,6 +235,9 @@ omit = [
   "edgar/**/examples.py",
   "edgar/**/examples/*.py",
   "edgar/display/demo.py",
+  "edgar/thirteenf/demo_comparison.py",
+  # __main__-only data download stubs (not library code)
+  "edgar/reference/financials.py",
   # Training scripts (ML training utilities, not runtime code)
   "edgar/entity/training/*",
   # Migration utilities (one-time migration helpers)
@@ -318,6 +324,7 @@ markers = [
     "integration: Integration tests",
     "data_quality: Data quality validation tests",
     "vcr: Tests using VCR cassettes for recorded HTTP responses",
+    "manual: Manual-only tests, excluded from CI (slow evaluations, benchmarks)",
 ]
 
 [tool.pyright]

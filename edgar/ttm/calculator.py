@@ -191,6 +191,22 @@ class TTMCalculator:
             warning=warning
         )
 
+    def quarterize(self) -> List[FinancialFact]:
+        """Convert YTD and annual facts into discrete quarterly facts.
+
+        Derives Q2, Q3, Q4 from cumulative filings:
+          Q2 = YTD_6M - Q1
+          Q3 = YTD_9M - YTD_6M
+          Q4 = FY - YTD_9M
+
+        Derived facts have ``calculation_context`` set to the derivation method
+        (e.g., 'derived_q4_fy_minus_ytd9').
+
+        Returns:
+            Quarterly facts sorted by period_end descending.
+        """
+        return self._quarterize_facts()
+
     def calculate_ttm_trend(self, periods: int = 8) -> pd.DataFrame:
         """Calculate rolling TTM values for multiple periods.
 
@@ -239,6 +255,19 @@ class TTMCalculator:
                 f"found {len(sorted_facts)} quarters"
             )
 
+        # Detect company FYE month so labels can be derived from period_end without
+        # relying on the as_of_fact's tagged fiscal_year. The SEC tags comparative
+        # facts in next-year filings with the FILING's fiscal_year, so a Q1 2024
+        # fact re-filed as a comparative in 2025 ends up with fy=2025. After
+        # _deduplicate_by_period_end keeps the most recently filed version, the
+        # as_of_fact carries that comparative-shifted fy and produces collided
+        # labels like "Q1 2025" for two distinct windows (GH #793).
+        from edgar.entity.enhanced_statement import (
+            calculate_fiscal_year_for_label,
+            detect_fiscal_year_end,
+        )
+        fiscal_year_end_month = detect_fiscal_year_end(self.facts)
+
         # 4. Calculate only the requested number of TTM windows (from most recent)
         # For YoY growth, we need 4 extra quarters, so calculate a few more if available
         results = []
@@ -261,17 +290,23 @@ class TTMCalculator:
                 if prior_ttm > 0:
                     yoy_growth = (ttm_value - prior_ttm) / prior_ttm
 
-            # Build result row
+            # Build result row. Derive the label fiscal_year from period_end + FYE
+            # rather than trusting as_of_fact.fiscal_year (see GH #793).
             as_of_fact = sorted_facts[i]
+            label_fy = calculate_fiscal_year_for_label(
+                as_of_fact.period_end, fiscal_year_end_month
+            )
             results.append({
-                'as_of_quarter': f"{as_of_fact.fiscal_period} {as_of_fact.fiscal_year}",
+                'as_of_quarter': f"{as_of_fact.fiscal_period} {label_fy}",
                 'ttm_value': ttm_value,
-                'fiscal_year': as_of_fact.fiscal_year,
+                'fiscal_year': label_fy,
                 'fiscal_period': as_of_fact.fiscal_period,
                 'as_of_date': as_of_fact.period_end,  # Add period_end for statement builder
                 'yoy_growth': yoy_growth,
                 'periods_included': [
-                    (q.fiscal_year, q.fiscal_period) for q in ttm_window
+                    (calculate_fiscal_year_for_label(q.period_end, fiscal_year_end_month),
+                     q.fiscal_period)
+                    for q in ttm_window
                 ]
             })
 
@@ -398,16 +433,16 @@ class TTMCalculator:
 
     def _is_additive_concept(self, fact: FinancialFact) -> bool:
         """Check if a fact represents an additive concept (safe for derivation).
-        
+
         Derivation (e.g., Q4 = FY - YTD_9M) relies on the concept being additive over time.
         Non-additive concepts cannot be subtracted to find a period-specific value.
-        
+
         Returns False for:
         - Instant facts (Assets, Equity) - point-in-time, not flows
         - Share counts (UnitType.SHARES) - not additive
         - Ratios/Rates (UnitType.RATIO) - averages, not sums
         - Per-share metrics (EPS) - derived from Income/Shares, shares change
-        
+
         Returns True for:
         - Duration monetary flows (Revenue, Net Income) - truly additive
         """
@@ -709,17 +744,17 @@ class TTMCalculator:
         eps_concept: str = 'us-gaap:EarningsPerShareBasic'
     ) -> List[FinancialFact]:
         """Calculate EPS for derived quarters using Net Income / Weighted Avg Shares.
-        
-        This method provides accurate Q4 EPS calculation by:
-        1. Deriving Q4 Net Income (additive, safe to derive)
-        2. Using FY Weighted Average Shares for Q4 (best available)
-        3. Computing Q4 EPS = Q4 Net Income / FY Shares
-        
+
+        Uses a two-route approach for accuracy:
+        - Route A (stable shares, CV ≤ 0.03): Derive Q4 EPS via subtraction
+          (FY_EPS - Q1 - Q2 - Q3). Mathematically exact when shares are constant.
+        - Route B (volatile shares, CV > 0.03): Derive Q4 using NI/shares formula.
+
         Args:
             net_income_facts: Facts for NetIncomeLoss concept
             shares_facts: Facts for WeightedAverageNumberOfSharesOutstandingBasic
             eps_concept: XBRL concept for the EPS (default: basic)
-        
+
         Returns:
             List of derived EPS FinancialFact objects for Q4 periods
 
@@ -737,32 +772,92 @@ class TTMCalculator:
             log.debug("No derived Q4 Net Income found - cannot calculate Q4 EPS")
             return derived_eps
 
-        # Step 2: Get shares by period (FY and YTD9)
+        # Step 2: Get shares by period (FY, YTD9, and quarterly for CV check)
         shares_calculator = TTMCalculator(shares_facts)
         fy_shares_list = shares_calculator._filter_by_duration(DurationBucket.ANNUAL)
         ytd9_shares_list = shares_calculator._filter_by_duration(DurationBucket.YTD_9M)
+        q_shares_list = shares_calculator._filter_by_duration(DurationBucket.QUARTER)
 
         # Build lookup by fiscal year
         fy_shares_by_year = {s.fiscal_year: s.numeric_value for s in fy_shares_list}
         ytd9_shares_by_year = {s.fiscal_year: s.numeric_value for s in ytd9_shares_list}
 
+        # Build quarterly shares lookup: {fiscal_year: [Q1_WAS, Q2_WAS, ...]}
+        q_shares_by_year: dict = {}
+        for s in q_shares_list:
+            q_shares_by_year.setdefault(s.fiscal_year, []).append(s.numeric_value)
+
+        # Compute per-year CV of quarterly WAS to detect buyback-heavy years
+        shares_cv_by_year = self._compute_shares_cv(
+            q_shares_by_year, fy_shares_by_year, ytd9_shares_by_year
+        )
+
         # Step 3: Calculate Q4 EPS
         for q4_ni in q4_net_income:
             eps_fact = self._calculate_single_q4_eps(
-                q4_ni, fy_shares_by_year, ytd9_shares_by_year, eps_concept
+                q4_ni, fy_shares_by_year, ytd9_shares_by_year, eps_concept,
+                shares_cv_by_year=shares_cv_by_year
             )
             if eps_fact:
                 derived_eps.append(eps_fact)
 
         return derived_eps
 
+    @staticmethod
+    def _compute_shares_cv(
+        q_shares_by_year: dict,
+        fy_shares_by_year: dict,
+        ytd9_shares_by_year: Optional[dict] = None
+    ) -> dict:
+        """Compute coefficient of variation of quarterly WAS per fiscal year.
+
+        Returns dict of {fiscal_year: cv_value}. CV > 0.03 indicates significant
+        share count variability (buybacks, dilution), where the linear WAS
+        approximation becomes unreliable.
+
+        Uses quarterly data when available, otherwise estimates from FY vs YTD9.
+        """
+        import statistics
+        result = {}
+        # From quarterly data (most accurate)
+        for fy, q_values in q_shares_by_year.items():
+            valid = [v for v in q_values if v and v > 0]
+            if len(valid) >= 2:
+                mean = statistics.mean(valid)
+                if mean > 0:
+                    result[fy] = statistics.stdev(valid) / mean
+            elif len(valid) == 1 and fy in fy_shares_by_year:
+                fy_was = fy_shares_by_year[fy]
+                if fy_was and fy_was > 0:
+                    result[fy] = abs(valid[0] - fy_was) / fy_was
+
+        # For years without quarterly data, estimate from FY vs YTD9
+        ytd9_map = ytd9_shares_by_year or {}
+        for fy, fy_was in fy_shares_by_year.items():
+            if fy in result:
+                continue  # Already computed from quarterly data
+            ytd9_was = ytd9_map.get(fy)
+            if ytd9_was and ytd9_was > 0 and fy_was and fy_was > 0:
+                # If FY and YTD9 WAS differ significantly, shares are volatile
+                result[fy] = abs(fy_was - ytd9_was) / fy_was
+        return result
+
     def _calculate_single_q4_eps(
         self,
         q4_ni: FinancialFact,
         fy_shares_map: dict,
         ytd9_shares_map: dict,
-        eps_concept: str
+        eps_concept: str,
+        shares_cv_by_year: Optional[dict] = None
     ) -> Optional[FinancialFact]:
+        """Calculate Q4 EPS for a single fiscal year.
+
+        Uses CV-based routing:
+        - CV ≤ 0.03 (stable shares): Q4_EPS = Q4_NI / FY_WAS (FY WAS is a
+          good proxy for Q4 WAS when shares are stable)
+        - CV > 0.03 (volatile shares): Q4_WAS = 4*FY_WAS - 3*YTD9_WAS,
+          then Q4_EPS = Q4_NI / Q4_WAS
+        """
         from edgar.core import log
         from edgar.entity.mappings_loader import get_primary_statement
         fy = q4_ni.fiscal_year
@@ -773,21 +868,35 @@ class TTMCalculator:
 
         fy_shares = fy_shares_map[fy]
         ytd9_shares = ytd9_shares_map.get(fy)
-        q4_shares = fy_shares # Default fallback
 
-        # Precise Q4 shares formula: Q4_WAS = 4 * FY_WAS - 3 * YTD9_WAS
-        if ytd9_shares and ytd9_shares > 0:
-            calculated_q4_shares = 4 * fy_shares - 3 * ytd9_shares
+        # Determine share volatility for this year
+        cv = (shares_cv_by_year or {}).get(fy, 0.0)
+        cv_threshold = 0.03
 
-            if calculated_q4_shares > 0:
-                q4_shares = calculated_q4_shares
-                share_change_pct = ((q4_shares - fy_shares) / fy_shares) * 100
-                log.debug(f"FY{fy}: Q4 WAS = {q4_shares/1e6:.2f}M "
-                            f"(FY: {fy_shares/1e6:.2f}M, change: {share_change_pct:.1f}%)")
-            else:
-                log.debug(f"FY{fy}: Derived Q4 shares invalid ({calculated_q4_shares}), using FY shares")
+        if cv <= cv_threshold:
+            # Route A: Stable shares — use FY WAS directly (accurate proxy for Q4)
+            q4_shares = fy_shares
+            calc_method = 'derived_eps_stable_shares'
+            log.debug(f"FY{fy}: Stable shares (CV={cv:.4f}), using FY WAS = {fy_shares/1e6:.2f}M")
         else:
-            log.debug(f"FY{fy}: No YTD9 shares, using FY shares")
+            # Route B: Volatile shares — derive Q4 WAS from linear formula
+            q4_shares = fy_shares  # Default fallback
+            calc_method = 'derived_eps_volatile_shares'
+
+            if ytd9_shares and ytd9_shares > 0:
+                calculated_q4_shares = 4 * fy_shares - 3 * ytd9_shares
+
+                if calculated_q4_shares > 0:
+                    q4_shares = calculated_q4_shares
+                    share_change_pct = ((q4_shares - fy_shares) / fy_shares) * 100
+                    log.debug(f"FY{fy}: Volatile shares (CV={cv:.4f}), "
+                              f"Q4 WAS = {q4_shares/1e6:.2f}M "
+                              f"(FY: {fy_shares/1e6:.2f}M, change: {share_change_pct:.1f}%)")
+                else:
+                    log.debug(f"FY{fy}: Derived Q4 shares invalid ({calculated_q4_shares}), "
+                              f"using FY shares")
+            else:
+                log.debug(f"FY{fy}: Volatile shares but no YTD9 available, using FY shares")
 
         # Guard against division by zero
         if q4_shares <= 0:
@@ -797,7 +906,8 @@ class TTMCalculator:
         q4_eps_value = q4_ni.numeric_value / q4_shares
 
         log.debug(f"Derived Q4 EPS for FY{fy}: ${q4_eps_value:.2f} "
-                    f"(NI ${q4_ni.numeric_value/1e9:.2f}B / {q4_shares/1e9:.2f}B shares)")
+                  f"(NI ${q4_ni.numeric_value/1e9:.2f}B / {q4_shares/1e9:.2f}B shares, "
+                  f"route={'A-stable' if cv <= cv_threshold else 'B-volatile'})")
 
         clean_concept = eps_concept.split(':')[-1] if ':' in eps_concept else eps_concept
         statement_type = get_primary_statement(clean_concept)
@@ -818,7 +928,7 @@ class TTMCalculator:
             form_type=q4_ni.form_type,
             accession=q4_ni.accession,
             statement_type=statement_type,
-            calculation_context='derived_eps_from_ni_shares'
+            calculation_context=calc_method
         )
 
     def _find_prior_quarter(

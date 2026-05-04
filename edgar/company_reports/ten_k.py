@@ -1,6 +1,6 @@
 """Form 10-K annual report class."""
 import re
-from functools import cached_property, lru_cache
+from functools import cached_property
 
 from rich import box
 from rich.console import Group, Text
@@ -336,13 +336,158 @@ class TenK(CompanyReport):
             return index
         return None
 
-    @lru_cache(maxsize=1)
     def id_parse_document(self, markdown:bool=False):
+        cache = getattr(self, '_id_parse_cache', {})
+        if markdown in cache:
+            return cache[markdown]
         from edgar.files.html_documents_id_parser import ParsedHtml10K
-        return ParsedHtml10K().extract_html(self._filing.html(), self.structure, markdown=markdown)
+        result = ParsedHtml10K().extract_html(self._filing.html(), self.structure, markdown=markdown)
+        cache[markdown] = result
+        self._id_parse_cache = cache
+        return result
 
     def __str__(self):
         return f"""TenK('{self.company}')"""
+
+    def to_context(self, detail: str = 'standard', focus: 'str | list[str] | None' = None) -> str:
+        """
+        AI-optimized context string.
+
+        Args:
+            detail: 'minimal' (~100 tokens), 'standard' (~300 tokens), 'full' (~500+ tokens)
+            focus: Optional topic or list of topics for cross-cutting context.
+                   When set, returns statement lines + note + policy for that topic.
+                   Example: focus='debt' or focus=['debt', 'revenue']
+        """
+        # Handle focus mode — cross-cutting topic context
+        if focus:
+            return self._focused_context(focus, detail)
+
+        from edgar.display.formatting import format_currency_short
+
+        lines = []
+
+        # === IDENTITY ===
+        lines.append(f"TENK: {self.company} Annual Report")
+        lines.append("")
+
+        # === CORE METADATA ===
+        try:
+            period = self.period_of_report
+            if period:
+                lines.append(f"Period: {period}")
+        except Exception:
+            pass
+        lines.append(f"Filed: {self.filing_date}")
+
+        if detail == 'minimal':
+            # Headline financials for minimal only
+            try:
+                fin = self.financials
+                if fin:
+                    cs = fin.get_currency_symbol()
+                    revenue = fin.get_revenue()
+                    net_income = fin.get_net_income()
+                    if revenue:
+                        lines.append(f"Revenue: {format_currency_short(revenue, cs)}")
+                    if net_income:
+                        lines.append(f"Net Income: {format_currency_short(net_income, cs)}")
+            except Exception:
+                pass
+            return "\n".join(lines)
+
+        # === STANDARD ===
+        lines.append(f"Form: {self.form}")
+        lines.append(f"CIK: {str(self._filing.cik).zfill(10)}")
+
+        # Financials section
+        try:
+            fin = self.financials
+            if fin:
+                cs = fin.get_currency_symbol()
+                fin_lines = []
+                for label, getter in [
+                    ("Revenue", "get_revenue"),
+                    ("Net Income", "get_net_income"),
+                    ("Total Assets", "get_total_assets"),
+                    ("Operating Income", "get_operating_income"),
+                    ("Stockholders Equity", "get_stockholders_equity"),
+                ]:
+                    try:
+                        val = getattr(fin, getter)()
+                        if val is not None:
+                            fin_lines.append(f"  {label}: {format_currency_short(val, cs)}")
+                    except Exception:
+                        pass
+                if fin_lines:
+                    lines.append("")
+                    lines.append("FINANCIALS:")
+                    lines.extend(fin_lines)
+        except Exception:
+            pass
+
+        # Sections
+        try:
+            items = self.items
+            if items:
+                # Deduplicate and sort by item number
+                seen = set()
+                unique_items = []
+                for item in items:
+                    if item not in seen:
+                        seen.add(item)
+                        unique_items.append(item)
+                unique_items.sort(key=lambda x: (
+                    int(''.join(c for c in x.split()[-1] if c.isdigit()) or '0'),
+                    x.split()[-1]
+                ))
+                lines.append("")
+                lines.append("SECTIONS:")
+                lines.append(f"  {', '.join(unique_items)}")
+        except Exception:
+            pass
+
+        # Available actions
+        lines.append("")
+        lines.append("AVAILABLE ACTIONS:")
+        lines.append("  .financials              XBRL financial statements")
+        lines.append("  .income_statement        Income statement")
+        lines.append("  .balance_sheet           Balance sheet")
+        lines.append("  .cash_flow_statement     Cash flow statement")
+        lines.append("  .notes                   Notes to financial statements")
+        lines.append("  .business                Item 1 business description")
+        lines.append("  .risk_factors            Item 1A risk factors")
+        lines.append("  .management_discussion   Item 7 MD&A")
+        lines.append("  .items                   All available section items")
+        lines.append("  .subsidiaries            Exhibit 21 subsidiary list")
+
+        if detail == 'standard':
+            return "\n".join(lines)
+
+        # === FULL ===
+        try:
+            auditor = self.auditor
+            if auditor:
+                lines.append("")
+                lines.append("AUDITOR:")
+                aud_line = f"  {auditor.name}"
+                if auditor.location:
+                    aud_line += f", {auditor.location}"
+                if auditor.firm_id:
+                    aud_line += f" (PCAOB #{auditor.firm_id})"
+                lines.append(aud_line)
+        except Exception:
+            pass
+
+        try:
+            subs = self.subsidiaries
+            if subs and len(subs) > 0:
+                lines.append("")
+                lines.append(f"SUBSIDIARIES: {len(subs)} entities")
+        except Exception:
+            pass
+
+        return "\n".join(lines)
 
     def __getitem__(self, item_or_part: str):
         """
@@ -436,6 +581,17 @@ class TenK(CompanyReport):
                     text = self.sections[part_iv_key].text()
                     if text and text.strip():
                         return text
+
+                # PRIORITY 1.5: Try combined-items keys (e.g., "Items 1 and 2. Business and Properties")
+                # Some filings (energy, MLP, REIT) combine items under a single heading.
+                # Match whether the item is the first or second number: items_1_and_2 or items_2_and_3
+                inum = re.escape(item_num)
+                combined_pattern = re.compile(rf'part_[iv]+_items_(?:{inum}_and_\d+|\d+_and_{inum})')
+                for key in self.sections:
+                    if combined_pattern.match(key):
+                        text = self.sections[key].text()
+                        if text and text.strip():
+                            return text
 
             # PRIORITY 2: Direct key lookup (e.g., 'Item 1', 'business' if pattern-based)
             if item_or_part in self.sections:

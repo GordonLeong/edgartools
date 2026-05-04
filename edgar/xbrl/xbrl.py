@@ -134,6 +134,19 @@ class XBRL:
         # Reverse index: element_name -> list of context_ids with facts (lazy-initialized)
         self._element_context_index = None
 
+        # FilingSummary-based role categories (role_uri -> category string)
+        self._filing_summary_categories: Dict[str, str] = {}
+        # FilingSummary-based menu categories (role_uri -> MenuCategory string)
+        self._filing_summary_menu_categories: Dict[str, str] = {}
+
+        # Cache for statement concepts used by notes.py expands logic (lazy-initialized)
+        self._statement_concepts_cache = None
+
+        # Notes caches (lazy-initialized by notes.py)
+        self._notes_cache = None                  # Notes collection once built
+        self._concept_to_notes_cache = None       # Reverse index: concept_id → List[Note]
+        self._filing_summary = None               # FilingSummary for rich notes hierarchy
+
     def _is_dimension_display_statement(self, statement_type: str, role_definition: str) -> bool:
         """
         Determine if a statement should display dimensioned line items.
@@ -523,10 +536,69 @@ class XBRL:
 
         if xbrl_attachments.get('instance'):
             xbrl.parser.parse_instance_content(xbrl_attachments.get('instance').content)
+        elif not xbrl_attachments.empty:
+            # Instance document missing from local SGML — SEC feed files before ~Oct 2020
+            # did not include the extracted iXBRL instance document.
+            # Fall back to fetching it from the filing homepage if network fallback is allowed.
+            from edgar.storage import is_using_local_storage, is_network_fallback_allowed
+            if is_using_local_storage() and is_network_fallback_allowed():
+                homepage_xbrl = XBRLAttachments(filing.homepage.attachments)
+                if homepage_xbrl.get('instance'):
+                    log.info(
+                        f"Instance document not in local storage for {filing.accession_no}. "
+                        f"Fetching from SEC (network fallback)."
+                    )
+                    xbrl.parser.parse_instance_content(homepage_xbrl.get('instance').content)
+                else:
+                    log.warning(
+                        f"XBRL instance document not found for {filing.accession_no}. "
+                        f"Entity info and facts will be unavailable."
+                    )
+            else:
+                log.warning(
+                    f"XBRL instance document not in local storage for {filing.accession_no}. "
+                    f"Enable network fallback or re-download this filing to access XBRL data."
+                )
 
         # Capture SGML period_of_report for date discrepancy detection
         try:
             xbrl._sgml_period_of_report = filing.period_of_report
+        except Exception:
+            pass
+
+        # Try to set industry from filing header SIC for industry-specific standardization
+        try:
+            if hasattr(filing, '_sgml') and filing._sgml is not None:
+                # Only use SIC if header is already loaded (no extra network call)
+                header = filing._sgml.header
+                if header and header.filers:
+                    sic = header.filers[0].company_data.assigned_sic
+                    if sic:
+                        xbrl.standardization.set_industry_from_sic(sic)
+        except Exception:
+            pass
+
+        # Load authoritative categories from FilingSummary.xml
+        # SGML is already loaded from filing.attachments above, so this is zero-cost
+        try:
+            sgml = filing.sgml()
+            if sgml:
+                filing_summary = sgml.filing_summary
+                if filing_summary:
+                    _MENU_CATEGORY_TO_CLASSIFICATION = {
+                        'Notes': 'note',
+                        'Tables': 'note',
+                        'Policies': 'note',
+                        'Details': 'disclosure',
+                        'Cover': 'document',
+                    }
+                    for report in filing_summary.reports:
+                        if report.role and report.menu_category:
+                            classification = _MENU_CATEGORY_TO_CLASSIFICATION.get(report.menu_category)
+                            if classification:
+                                xbrl._filing_summary_categories[report.role] = classification
+                            xbrl._filing_summary_menu_categories[report.role] = report.menu_category
+                    xbrl._filing_summary = filing_summary
         except Exception:
             pass
 
@@ -729,7 +801,42 @@ class XBRL:
                     if 'BalanceSheet' not in statement_type:
                         break
 
-            # If we didn't find a match, try additional patterns for notes and disclosures
+            # If we didn't find a match, try IFRS concept → type mapping
+            if not statement_type:
+                _IFRS_CONCEPT_TO_TYPE = {
+                    "ifrs-full_StatementOfProfitOrLossAbstract": "IncomeStatement",
+                    "ifrs-full_IncomeStatementAbstract": "IncomeStatement",
+                    "ifrs-full_StatementOfFinancialPositionAbstract": "BalanceSheet",
+                    "ifrs-full_StatementOfCashFlowsAbstract": "CashFlowStatement",
+                    "ifrs-full_StatementOfChangesInEquityAbstract": "StatementOfEquity",
+                    "ifrs-full_StatementOfComprehensiveIncomeAbstract": "ComprehensiveIncome",
+                    "ifrs-full_StatementOfProfitOrLossAndOtherComprehensiveIncomeAbstract": "ComprehensiveIncome",
+                }
+                matched_type = _IFRS_CONCEPT_TO_TYPE.get(primary_concept)
+                if matched_type:
+                    if 'parenthetical' in role_def:
+                        statement_type = f"{matched_type}Parenthetical"
+                    else:
+                        statement_type = matched_type
+
+            # Use FilingSummary.xml authoritative categories if available (Fix 2)
+            if not statement_type and role in self._filing_summary_categories:
+                fs_category = self._filing_summary_categories[role]
+                fs_menu = self._filing_summary_menu_categories.get(role, '')
+                statement_category = fs_category
+                # Derive a type name from the menu category
+                if fs_menu == 'Notes':
+                    statement_type = "Notes"
+                elif fs_menu == 'Tables':
+                    statement_type = "NoteTable"
+                elif fs_menu == 'Policies':
+                    statement_type = "AccountingPolicies"
+                elif fs_menu == 'Details':
+                    statement_type = "Disclosures"
+                elif fs_menu == 'Cover':
+                    statement_type = "CoverPage"
+
+            # Fall back to keyword-based patterns for notes and disclosures
             if not statement_type:
                 if 'us-gaap_NotesToFinancialStatementsAbstract' in primary_concept or 'note' in role_def:
                     statement_type = "Notes"
@@ -754,7 +861,8 @@ class XBRL:
                 'type': statement_type,
                 'primary_concept': primary_concept,
                 'role_name': role_name,
-                'category': statement_category  # This will be None for backward compatibility unless set above
+                'category': statement_category,  # This will be None for backward compatibility unless set above
+                'menu_category': self._filing_summary_menu_categories.get(role)  # From FilingSummary.xml
             }
 
             statements.append(statement)
@@ -965,7 +1073,8 @@ class XBRL:
         # Generate line items recursively
         line_items = []
         self._generate_line_items(root_id, tree.all_nodes, line_items, period_filter, None,
-                                  should_display_dimensions, valid_dimensional_members, view)
+                                  should_display_dimensions, valid_dimensional_members, view,
+                                  statement_role=found_role)
 
         # Apply revenue deduplication for income statements to fix Issue #438
         if actual_statement_type == 'IncomeStatement':
@@ -987,7 +1096,8 @@ class XBRL:
                              result: List[Dict[str, Any]], period_filter: Optional[str] = None,
                              path: Optional[List[str]] = None, should_display_dimensions: bool = False,
                              valid_dimensional_members: Optional[Dict[str, Set[str]]] = None,
-                             view: Optional['StatementView'] = None) -> None:
+                             view: Optional['StatementView'] = None,
+                             statement_role: Optional[str] = None) -> None:
         """
         Recursively generate line items for a statement.
 
@@ -1004,6 +1114,7 @@ class XBRL:
                   STANDARD: Strict member filtering per presentation linkbase
                   DETAILED: Relaxed filtering - show all dimensional facts (fixes GH-574)
                   SUMMARY: No dimensional facts shown
+            statement_role: Role URI of the statement being generated (GH-712)
         """
         from edgar.xbrl.presentation import StatementView
         if element_id not in nodes:
@@ -1042,15 +1153,25 @@ class XBRL:
                 from edgar.xbrl.parsers.concepts import get_balance_type
                 balance = get_balance_type(element_id)
 
-        # Get weight and calculation parent from calculation trees (Issue #463, #514)
+        # Get weight and calculation parent from calculation trees (Issue #463, #514, GH-712)
         calculation_parent = None
         if hasattr(self, 'calculation_trees') and self.calculation_trees:
-            for calc_tree in self.calculation_trees.values():
+            # GH-712: Prefer calc tree matching this statement's role URI
+            if statement_role and statement_role in self.calculation_trees:
+                calc_tree = self.calculation_trees[statement_role]
                 if element_id_normalized in calc_tree.all_nodes:
                     calc_node = calc_tree.all_nodes[element_id_normalized]
                     weight = calc_node.weight
-                    calculation_parent = calc_node.parent  # Metric parent (Issue #514 refinement)
-                    break  # Use first weight/parent found
+                    calculation_parent = calc_node.parent
+
+            # Fallback: iterate all calc trees if not found in statement's own tree
+            if weight is None:
+                for calc_tree in self.calculation_trees.values():
+                    if element_id_normalized in calc_tree.all_nodes:
+                        calc_node = calc_tree.all_nodes[element_id_normalized]
+                        weight = calc_node.weight
+                        calculation_parent = calc_node.parent
+                        break
 
         # Calculate preferred_sign from preferred_label (for Issue #463)
         # This determines display transformation: -1 = negate, 1 = as-is, None = not specified
@@ -1178,43 +1299,118 @@ class XBRL:
                             pt = context.period.get('type') if isinstance(context.period, dict) else getattr(context.period, 'type', None)
                             period_types[period_key] = pt
 
+                elif not non_dimensioned_facts_for_period and not values.get(period_key):
+                    # Issue #646: No non-dimensional total — compute from dimensional members
+                    # Use only facts that passed is_valid_dimension filtering
+                    valid_dim_facts = [
+                        (cid, wf) for cid, wf in period_facts
+                        if wf['dimension_info'] and len(wf['dimension_info']) == 1  # Skip multi-axis facts
+                    ]
+                    # Re-apply is_valid_dimension filter (match the logic above)
+                    filtered_dim_facts = []
+                    for cid, wf in valid_dim_facts:
+                        dim_info = wf['dimension_info']
+                        is_valid = True
+                        if view != StatementView.DETAILED and valid_dimensional_members:
+                            for dim_data in dim_info:
+                                axis_key = dim_data.get('dimension', '').replace(':', '_')
+                                member_key = dim_data.get('member', '').replace(':', '_')
+                                if axis_key in valid_dimensional_members:
+                                    if member_key not in valid_dimensional_members[axis_key]:
+                                        is_valid = False
+                                        break
+                        if is_valid:
+                            filtered_dim_facts.append((cid, wf))
+
+                    synthetic = self._compute_synthetic_total(filtered_dim_facts, element_id_normalized)
+                    if synthetic:
+                        values[period_key] = synthetic['total']
+                        fact = synthetic['fact']
+                        context_id = synthetic['context_id']
+
+                        if fact.decimals is not None:
+                            try:
+                                if fact.decimals == 'INF':
+                                    decimals[period_key] = 0
+                                else:
+                                    decimals[period_key] = int(fact.decimals)
+                            except (ValueError, TypeError):
+                                decimals[period_key] = 0
+
+                        units[period_key] = fact.unit_ref
+
+                        if context_id in self.contexts:
+                            context = self.contexts[context_id]
+                            if hasattr(context, 'period') and context.period:
+                                pt = context.period.get('type') if isinstance(context.period, dict) else getattr(context.period, 'type', None)
+                                period_types[period_key] = pt
+
             else:
                 # For standard financial statements, prefer non-dimensioned facts
                 # Issue #564: Select by (1) fewest dimensions, (2) highest precision
-                if len(period_facts) == 1:
-                    context_id, wrapped_fact = period_facts[0]
-                    fact = wrapped_fact['fact']
+                # Issue #646: When only dimensional facts exist, compute total from members
+                non_dim_facts = [(cid, wf) for cid, wf in period_facts if not wf['dimension_info']]
+
+                if non_dim_facts:
+                    # Normal path: select best non-dimensional fact
+                    if len(non_dim_facts) == 1:
+                        context_id, wrapped_fact = non_dim_facts[0]
+                        fact = wrapped_fact['fact']
+                    else:
+                        best = min(non_dim_facts,
+                                   key=lambda x: (len(x[1]['dimension_info']),
+                                                  -self._get_fact_precision(x[1]['fact'])))
+                        context_id, wrapped_fact = best
+                        fact = wrapped_fact['fact']
+
+                    values[period_key] = fact.numeric_value if fact.numeric_value is not None else fact.value
+
+                    # Store the decimals info for proper scaling
+                    if fact.decimals is not None:
+                        try:
+                            if fact.decimals == 'INF':
+                                decimals[period_key] = 0
+                            else:
+                                decimals[period_key] = int(fact.decimals)
+                        except (ValueError, TypeError):
+                            decimals[period_key] = 0
+
+                    units[period_key] = fact.unit_ref
+
+                    if context_id in self.contexts:
+                        context = self.contexts[context_id]
+                        if hasattr(context, 'period') and context.period:
+                            pt = context.period.get('type') if isinstance(context.period, dict) else getattr(context.period, 'type', None)
+                            period_types[period_key] = pt
                 else:
-                    # Multiple contexts for same period - select best by dimensions and precision
-                    # min() with tuple key: (dimension_count ASC, -precision DESC)
-                    best = min(period_facts,
-                               key=lambda x: (len(x[1]['dimension_info']),
-                                              -self._get_fact_precision(x[1]['fact'])))
-                    context_id, wrapped_fact = best
-                    fact = wrapped_fact['fact']
+                    # Issue #646: No non-dimensional facts — compute total from dimensional members
+                    # Only use single-axis facts to avoid double-counting cross-dimensioned facts
+                    dim_facts = [
+                        (cid, wf) for cid, wf in period_facts
+                        if wf['dimension_info'] and len(wf['dimension_info']) == 1
+                    ]
+                    synthetic = self._compute_synthetic_total(dim_facts, element_id_normalized)
+                    if synthetic:
+                        values[period_key] = synthetic['total']
+                        fact = synthetic['fact']
+                        context_id = synthetic['context_id']
 
-                # Store the value
-                values[period_key] = fact.numeric_value if fact.numeric_value is not None else fact.value
+                        if fact.decimals is not None:
+                            try:
+                                if fact.decimals == 'INF':
+                                    decimals[period_key] = 0
+                                else:
+                                    decimals[period_key] = int(fact.decimals)
+                            except (ValueError, TypeError):
+                                decimals[period_key] = 0
 
-                # Store the decimals info for proper scaling
-                if fact.decimals is not None:
-                    try:
-                        if fact.decimals == 'INF':
-                            decimals[period_key] = 0  # Infinite precision, no scaling
-                        else:
-                            decimals[period_key] = int(fact.decimals)
-                    except (ValueError, TypeError):
-                        decimals[period_key] = 0  # Default if decimals can't be converted
+                        units[period_key] = fact.unit_ref
 
-                # Store unit_ref for this period
-                units[period_key] = fact.unit_ref
-
-                # Store period_type from context
-                if context_id in self.contexts:
-                    context = self.contexts[context_id]
-                    if hasattr(context, 'period') and context.period:
-                        pt = context.period.get('type') if isinstance(context.period, dict) else getattr(context.period, 'type', None)
-                        period_types[period_key] = pt
+                        if context_id in self.contexts:
+                            context = self.contexts[context_id]
+                            if hasattr(context, 'period') and context.period:
+                                pt = context.period.get('type') if isinstance(context.period, dict) else getattr(context.period, 'type', None)
+                                period_types[period_key] = pt
 
         # Create preferred_signs dict for all periods (same value for all periods of this concept)
         preferred_signs = {}
@@ -1278,6 +1474,8 @@ class XBRL:
 
         # For dimensional statements, add dimensioned facts as child line items
         if should_display_dimensions and dimensioned_facts:
+            # Track dimensional items added for this concept (for hierarchy post-processing)
+            dim_items_added = []
             # Add each dimension as a child line item with increased depth
             for dim_key, facts_list in dimensioned_facts.items():
                 dim_values = {}
@@ -1376,13 +1574,95 @@ class XBRL:
                     'dimension_metadata': dim_metadata  # Store full dimension information
                 }
 
-                # Add to result
-                result.append(dim_line_item)
+                # Collect (don't add to result yet — hierarchy may reorder)
+                dim_items_added.append(dim_line_item)
+
+            # Post-process: apply member hierarchy from definition linkbase
+            if dim_items_added:
+                self._apply_member_hierarchy(dim_items_added)
+            # Now add to result in correct order
+            result.extend(dim_items_added)
 
         # Process children
         for child_id in node.children:
             self._generate_line_items(child_id, nodes, result, period_filter, current_path,
-                                      should_display_dimensions, valid_dimensional_members, view)
+                                      should_display_dimensions, valid_dimensional_members, view,
+                                      statement_role=statement_role)
+
+    def _apply_member_hierarchy(self, dim_items: List[Dict[str, Any]]) -> None:
+        """Adjust level of dimensional items based on definition linkbase member hierarchy.
+
+        The definition linkbase defines member-to-member relationships (e.g.,
+        AutomotiveRevenuesMember → AutomotiveSalesMember). This method uses
+        those relationships to set proper nesting depth for dimensional items.
+        """
+        # Collect member IDs from dimensional items
+        member_to_item = {}
+        for item in dim_items:
+            meta = item.get('dimension_metadata')
+            if meta and len(meta) >= 1:
+                member_id = meta[0].get('member')
+                if member_id:
+                    member_to_item[member_id] = item
+
+        if len(member_to_item) <= 1:
+            return
+
+        member_ids = set(member_to_item.keys())
+        domains = self.parser.domains
+
+        # Find members that are parents of other members in our set
+        member_children = {}
+        for member_id in member_ids:
+            if member_id in domains and domains[member_id].members:
+                children_in_set = [m for m in domains[member_id].members if m in member_ids]
+                if children_in_set:
+                    member_children[member_id] = children_in_set
+
+        if not member_children:
+            return
+
+        # Compute depth offset: children get +1 relative to their parent
+        depth_offset = {m: 0 for m in member_ids}
+
+        def set_depth(parent_id, parent_depth):
+            for child_id in member_children.get(parent_id, []):
+                new_depth = parent_depth + 1
+                if new_depth > depth_offset[child_id]:
+                    depth_offset[child_id] = new_depth
+                    set_depth(child_id, new_depth)
+
+        for parent_id in member_children:
+            if depth_offset[parent_id] == 0:
+                set_depth(parent_id, 0)
+
+        # Apply depth offsets to levels
+        for member_id, item in member_to_item.items():
+            item['level'] += depth_offset[member_id]
+
+        # Reorder: parents before children
+        ordered = []
+        processed = set()
+
+        def add_with_children(member_id):
+            if member_id in processed:
+                return
+            processed.add(member_id)
+            ordered.append(member_to_item[member_id])
+            for child_id in member_children.get(member_id, []):
+                add_with_children(child_id)
+
+        # First add items that are top-level (depth 0)
+        for member_id in member_to_item:
+            if depth_offset[member_id] == 0:
+                add_with_children(member_id)
+        # Then any remaining
+        for member_id in member_to_item:
+            if member_id not in processed:
+                add_with_children(member_id)
+
+        # Replace items in-place
+        dim_items[:] = ordered
 
     @staticmethod
     def _reorder_by_calculation_parent(line_items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1476,6 +1756,52 @@ class XBRL:
                 item['level'] += 1
 
         return line_items
+
+    def _compute_synthetic_total(self, dim_facts, element_id_normalized):
+        """
+        Issue #646: Compute a synthetic total from single-axis dimensional members.
+
+        When a concept has only dimensional facts (no non-dimensional total),
+        group by axis, pick the axis with the most members, and sum their values.
+
+        Guards:
+        - Skips per-share and ratio concepts (summing them is meaningless)
+        - Expects only single-axis facts (caller must filter multi-axis facts)
+
+        Returns dict with 'total', 'fact', 'context_id' or None if not computable.
+        """
+        if not dim_facts:
+            return None
+
+        # Guard: don't synthesize totals for per-share or ratio concepts
+        element = self.element_catalog.get(element_id_normalized)
+        if element:
+            dt = (element.data_type or '').lower()
+            if 'pershare' in dt or 'pure' in dt:
+                return None
+
+        from collections import defaultdict
+        axis_groups = defaultdict(list)
+        for cid, wf in dim_facts:
+            dim_info = wf['dimension_info']
+            val = wf['fact'].numeric_value
+            if val is not None:
+                axis = dim_info[0].get('dimension', '')
+                axis_groups[axis].append((cid, wf, val))
+
+        if not axis_groups:
+            return None
+
+        # Pick the axis with most members (most complete breakdown)
+        best_axis = max(axis_groups.values(), key=len)
+        total = sum(v for _, _, v in best_axis)
+        first_cid, first_wf, _ = best_axis[0]
+
+        return {
+            'total': total,
+            'fact': first_wf['fact'],
+            'context_id': first_cid,
+        }
 
     @staticmethod
     def _get_fact_precision(fact) -> int:
@@ -1832,6 +2158,12 @@ class XBRL:
 
         # Get the statement data with all dimensional data, passing view for filtering
         statement_data = self.get_statement(statement_type, period_filter, should_display_dimensions, view=view)
+        if not statement_data:
+            return None
+
+        # Merge adjacent same-label rows with complementary NaN values (Issue #3n9t)
+        from edgar.xbrl.statements import _merge_complementary_rows
+        statement_data = _merge_complementary_rows(statement_data)
         if not statement_data:
             return None
 

@@ -37,7 +37,7 @@ class FinancialStatementTemplates:
         (0, "revenue_section", [
             # Product/Service Revenue Components
             "us-gaap:SalesRevenueGoodsNet",
-            "us-gaap:ProductSales", 
+            "us-gaap:ProductSales",
             "us-gaap:SalesRevenueServicesNet",
             "us-gaap:SubscriptionRevenue",
             # Contract Revenue
@@ -45,9 +45,12 @@ class FinancialStatementTemplates:
             "us-gaap:RevenueFromContractWithCustomerIncludingAssessedTax",
             # Total Revenue
             "us-gaap:Revenue",
-            "us-gaap:Revenues", 
+            "us-gaap:Revenues",
             "us-gaap:SalesRevenueNet",
-            "us-gaap:OperatingRevenue"
+            "us-gaap:OperatingRevenue",
+            # IFRS Revenue
+            "ifrs-full:Revenue",
+            "ifrs-full:RevenueFromContractsWithCustomers"
         ]),
 
         # Cost Section (100-199)
@@ -58,12 +61,16 @@ class FinancialStatementTemplates:
             "us-gaap:CostOfGoodsAndServicesSold",
             "us-gaap:CostOfSales",
             "us-gaap:DirectOperatingCosts",
-            "us-gaap:CostsAndExpenses"
+            "us-gaap:CostsAndExpenses",
+            # IFRS Cost
+            "ifrs-full:CostOfSales"
         ]),
 
         # Gross Profit (200-299)
         (200, "gross_profit", [
-            "us-gaap:GrossProfit"
+            "us-gaap:GrossProfit",
+            # IFRS Gross Profit
+            "ifrs-full:GrossProfit"
         ]),
 
         # Operating Expenses (300-399)
@@ -73,7 +80,7 @@ class FinancialStatementTemplates:
             "us-gaap:ResearchAndDevelopmentExpense",
             # SG&A Expenses
             "us-gaap:SellingGeneralAndAdministrativeExpense",
-            "us-gaap:GeneralAndAdministrativeExpense", 
+            "us-gaap:GeneralAndAdministrativeExpense",
             "us-gaap:AdministrativeExpense",
             "us-gaap:SellingAndMarketingExpense",
             "us-gaap:SellingExpense",
@@ -82,14 +89,20 @@ class FinancialStatementTemplates:
             # Total Operating Expenses
             "us-gaap:NoninterestExpense",
             "us-gaap:OperatingCostsAndExpenses",
-            "us-gaap:OperatingExpenses"
+            "us-gaap:OperatingExpenses",
+            # IFRS Operating Expenses
+            "ifrs-full:ResearchAndDevelopmentExpense",
+            "ifrs-full:AdministrativeExpense",
+            "ifrs-full:DistributionCosts"
         ]),
 
         # Operating Income (400-499)
         (400, "operating_income", [
             "us-gaap:OperatingIncomeLoss",
             "us-gaap:OperatingIncome",
-            "us-gaap:IncomeLossFromContinuingOperationsBeforeInterestAndTaxes"
+            "us-gaap:IncomeLossFromContinuingOperationsBeforeInterestAndTaxes",
+            # IFRS Operating Income
+            "ifrs-full:ProfitLossFromOperatingActivities"
         ]),
 
         # Non-Operating (500-599)
@@ -102,7 +115,10 @@ class FinancialStatementTemplates:
             "us-gaap:InvestmentIncomeInterest",  # NVIDIA uses this variant
             "us-gaap:OtherNonoperatingIncomeExpense",
             "us-gaap:NonoperatingIncomeExpense",
-            "orcl:NonoperatingIncomeExpenseIncludingEliminationOfNetIncomeLossAttributableToNoncontrollingInterests"
+            "orcl:NonoperatingIncomeExpenseIncludingEliminationOfNetIncomeLossAttributableToNoncontrollingInterests",
+            # IFRS Non-Operating
+            "ifrs-full:FinanceIncome",
+            "ifrs-full:FinanceCosts"
         ]),
 
         # Pre-Tax Income (600-699)
@@ -110,13 +126,17 @@ class FinancialStatementTemplates:
             "us-gaap:IncomeLossBeforeIncomeTaxes",
             "us-gaap:IncomeLossFromContinuingOperationsBeforeIncomeTaxes",
             "us-gaap:IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
-            "orcl:IncomeLossFromContinuingOperationsIncludingNoncontrollingInterestBeforeIncomeTaxesExtraordinaryItems"
+            "orcl:IncomeLossFromContinuingOperationsIncludingNoncontrollingInterestBeforeIncomeTaxesExtraordinaryItems",
+            # IFRS Pre-Tax
+            "ifrs-full:ProfitLossBeforeTax"
         ]),
 
         # Tax (700-799)
         (700, "tax", [
             "us-gaap:IncomeTaxesPaidNet",
-            "us-gaap:IncomeTaxExpenseBenefit"
+            "us-gaap:IncomeTaxExpenseBenefit",
+            # IFRS Tax
+            "ifrs-full:IncomeTaxExpenseContinuingOperations"
         ]),
 
         # Net Income (800-899)
@@ -127,7 +147,10 @@ class FinancialStatementTemplates:
             "us-gaap:NetIncomeLoss",
             "us-gaap:ProfitLoss",
             "us-gaap:NetIncomeLossAttributableToNonredeemableNoncontrollingInterest",
-            "us-gaap:NetIncomeLossAttributableToNoncontrollingInterest"
+            "us-gaap:NetIncomeLossAttributableToNoncontrollingInterest",
+            # IFRS Net Income
+            "ifrs-full:ProfitLoss",
+            "ifrs-full:ProfitLossAttributableToOwnersOfParent"
         ]),
 
         # Per Share Data (900-999)
@@ -137,7 +160,10 @@ class FinancialStatementTemplates:
             "us-gaap:EarningsPerShareDiluted",
             "us-gaap:WeightedAverageNumberOfSharesOutstandingAbstract",
             "us-gaap:WeightedAverageNumberOfSharesOutstandingBasic",
-            "us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding"
+            "us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding",
+            # IFRS EPS
+            "ifrs-full:BasicEarningsLossPerShare",
+            "ifrs-full:DilutedEarningsLossPerShare"
         ])
     ]
 
@@ -151,6 +177,7 @@ class FinancialStatementTemplates:
             "Accounts Receivable",
             "Trade Receivables",
             "Inventory",
+            "Inventories",
             "Prepaid Expenses",
             "Other Current Assets",
             "Total Current Assets"
@@ -163,6 +190,7 @@ class FinancialStatementTemplates:
             "Long-term Investments",
             "Goodwill",
             "Intangible Assets",
+            "Non-current Assets",
             "Other Non-current Assets",
             "Total Non-current Assets",
             "Total Assets"
@@ -185,6 +213,7 @@ class FinancialStatementTemplates:
             "Long-term Debt",
             "Deferred Revenue",
             "Deferred Tax Liabilities",
+            "Non-current Liabilities",
             "Other Non-current Liabilities",
             "Total Non-current Liabilities",
             "Total Liabilities"
@@ -193,10 +222,13 @@ class FinancialStatementTemplates:
         # Equity (800-999)
         (800, "equity", [
             "Common Stock",
+            "Share Capital",
             "Additional Paid-in Capital",
+            "Share Premium",
             "Retained Earnings",
             "Accumulated Other Comprehensive Income",
             "Treasury Stock",
+            "Treasury Shares",
             "Total Stockholders' Equity",
             "Total Shareholders' Equity",
             "Total Equity"
@@ -209,7 +241,7 @@ class FinancialStatementTemplates:
 
         Args:
             item_concept: The XBRL concept (e.g., "us-gaap:Revenue")
-            item_label: The display label (e.g., "Contract Revenue") 
+            item_label: The display label (e.g., "Contract Revenue")
             statement_type: Type of statement ("IncomeStatement", "BalanceSheet", etc.)
 
         Returns:
@@ -250,7 +282,7 @@ class FinancialStatementTemplates:
         Normalize XBRL concept for matching.
 
         Handles variations in concept format:
-        - "us-gaap:Revenue" vs "us-gaap_Revenue" 
+        - "us-gaap:Revenue" vs "us-gaap_Revenue"
         - Case sensitivity
         - Namespace prefixes
         """
@@ -267,6 +299,9 @@ class FinancialStatementTemplates:
             normalized = 'us-gaap_' + normalized.split('_', 1)[1]
         elif normalized.startswith('gaap_'):
             normalized = 'us-gaap_' + normalized.split('_', 1)[1]
+        # IFRS namespace variations: ifrs-full, ifrs
+        elif normalized.startswith('ifrs-full_') or normalized.startswith('ifrs_'):
+            normalized = 'ifrs-full_' + normalized.split('_', 1)[1]
 
         return normalized
 
@@ -276,7 +311,7 @@ class FinancialStatementTemplates:
             return False
 
         # For XBRL concepts in templates, don't try to match against labels
-        if ':' in label2 or '_gaap_' in label2.lower():
+        if ':' in label2 or '_gaap_' in label2.lower() or 'ifrs' in label2.lower():
             return False
 
         # Use existing normalization logic for label matching
@@ -410,7 +445,7 @@ class SemanticPositioning:
             # Revenue indicators
             if any(term in concept_lower for term in ['revenue', 'sales']) and not any(term in concept_lower for term in ['cost', 'expense']):
                 return "revenue"
-            # Cost indicators  
+            # Cost indicators
             elif any(term in concept_lower for term in ['cost of', 'cogs']):
                 return "cost"
             # Gross profit
@@ -631,7 +666,7 @@ class StatementOrderingManager:
 
                 # IMPORTANT: If we found a template position for a concept,
                 # also apply it to the corresponding label (and vice versa)
-                # This ensures consistent ordering regardless of whether the 
+                # This ensures consistent ordering regardless of whether the
                 # stitcher uses concept or label as the key
                 if is_concept and corresponding_label and corresponding_label in concepts:
                     template_order[corresponding_label] = template_pos
@@ -640,7 +675,7 @@ class StatementOrderingManager:
 
         return template_order
 
-    def _apply_reference_ordering(self, concepts: set, statements: List[Dict], 
+    def _apply_reference_ordering(self, concepts: set, statements: List[Dict],
                                  template_positioned: Dict[str, float]) -> Dict[str, float]:
         """Apply reference statement ordering for remaining concepts"""
         reference_order = self.reference_strategy.establish_reference_order(statements)
@@ -666,7 +701,7 @@ class StatementOrderingManager:
 
         return final_order
 
-    def _consolidate_section_ordering(self, semantic_positioned: Dict[str, float], 
+    def _consolidate_section_ordering(self, semantic_positioned: Dict[str, float],
                                      template_positioned: Dict[str, float],
                                      statements: List[Dict]) -> Dict[str, float]:
         """
@@ -722,7 +757,7 @@ class StatementOrderingManager:
                     section_base_pos = 950.0
 
                 # Ensure all items in this section stay grouped together
-                for i, item in enumerate(sorted(section_template_items, 
+                for i, item in enumerate(sorted(section_template_items,
                                                key=lambda x: template_items.get(x, 999.0))):
                     final_ordering[item] = section_base_pos + i * 0.1
 
@@ -788,7 +823,7 @@ class StatementOrderingManager:
         # For labels, use fuzzy matching
         return self._labels_match(concept, template_concept)
 
-    def _get_section_ranges(self, final_ordering: Dict[str, float], 
+    def _get_section_ranges(self, final_ordering: Dict[str, float],
                            template_sections: Dict[str, List[str]]) -> List[Tuple[float, float, str]]:
         """Get the position ranges occupied by each template section"""
         ranges = []
@@ -803,7 +838,7 @@ class StatementOrderingManager:
 
         return sorted(ranges)
 
-    def _find_insertion_point(self, desired_position: float, 
+    def _find_insertion_point(self, desired_position: float,
                              section_ranges: List[Tuple[float, float, str]]) -> float:
         """Find appropriate insertion point that doesn't break template sections"""
 

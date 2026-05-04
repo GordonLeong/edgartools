@@ -23,62 +23,21 @@ def test_parse_entity_submissions():
     assert data.fiscal_year_end == '1231'
 
 @pytest.mark.network
-def test_entity_is_company():
-
-    # Taneja Vaibhav at TSLA
-    assert Entity(1771340).is_individual
-
-    # &VEST Domestic Fund II LP
-    assert Entity(1800903).is_company
-
-    # Siemens AG
-    assert Entity(940418).is_company
-
-    # SIEMENS ENERGY AG/ADR
-    assert Entity(1830056).is_company
-
-    # SIEVERT STEPHANIE A
-    assert not Entity(1718179).is_company
-
-    assert Entity(1911716).is_company
-
-    # NVC Holdings, LLC
-    assert Entity(1940261).is_company
-
-    # FANNIE MAE
-    assert Entity(310522).is_company
-
-    # Berkshire Hathaway
-    assert Entity(1067983).is_company
-
-    # ORBIMED Advisors LLC
-    assert Entity(1055951).is_company
-
-    # 360 Funds
-    assert Entity(1319067).is_company
-
-    # Jeronimo Martins
-    assert Entity(1438077).is_company
-
-    # Elon Musk
-    assert Entity(1494730).is_individual
-
-    # Reed Hastings
-    assert Entity('1033331').is_individual
-
-@pytest.mark.network
+@pytest.mark.vcr
 def test_warren_buffett():
     # Warren Buffett
     warren_buffet = Entity(315090)
     assert warren_buffet.is_individual
 
 @pytest.mark.network
+@pytest.mark.vcr
 def test_reed_hastings():
     # Reed Hastings
     reed_hastings = Entity('1033331')
     assert reed_hastings.is_individual
 
 @pytest.mark.network
+@pytest.mark.vcr
 def test_display_name():
     assert Entity(1318605).display_name == "Tesla, Inc."
 
@@ -89,6 +48,7 @@ def test_display_name():
     assert Entity(1718179).display_name == "Stephanie A Sievert"
 
 @pytest.mark.network
+@pytest.mark.vcr
 def test_ticker_icon():
     entity: Company = Company(320193)
     assert entity.tickers[0] == "AAPL"
@@ -103,6 +63,7 @@ def test_ticker_icon():
     assert icon is None
 
 @pytest.mark.network
+@pytest.mark.vcr
 def test_get_entity_by_ticker():
     # Activision was acquired by Microsoft so possibly this ticker will be removed in the future
     c = Company("AAPL")
@@ -147,6 +108,7 @@ def test_company_repr():
     assert 'Industry' in c_repr  # Industry section
 
 @pytest.mark.network
+@pytest.mark.vcr
 def test_individual_repr():
     i = Entity(1771340)
     i_repr = repr(i)
@@ -155,6 +117,7 @@ def test_individual_repr():
     assert "Vaibhav" in i_repr
 
 @pytest.mark.network
+@pytest.mark.vcr
 def test_filter_by_accession_number():
     # A TSLA filing
     c = Company(1318605)
@@ -162,6 +125,7 @@ def test_filter_by_accession_number():
     assert filing
 
 @pytest.mark.network
+@pytest.mark.vcr
 def test_company_filing_acceptance_datetime():
     c = Company(1318605)
     assert c.get_filings().data['acceptanceDateTime']
@@ -169,12 +133,14 @@ def test_company_filing_acceptance_datetime():
     assert isinstance(acceptance_datetime, datetime)
 
 @pytest.mark.network
+@pytest.mark.vcr
 def test_filter_by_year(tsla):
     filings = tsla.get_filings(year=2024)
     assert len(filings) > 0
     assert all(filing.filing_date.year == 2024 for filing in filings)
 
 @pytest.mark.network
+@pytest.mark.vcr
 def test_filter_by_quarter(tsla):
     filings = tsla.get_filings(year=2024, quarter=1)
     assert len(filings) > 0

@@ -15,16 +15,35 @@ from edgar.sgml.sgml_header import FilingHeader
 from edgar.sgml.sgml_parser import SGMLDocument, SGMLFormatType, SGMLParser, parse_document
 from edgar.sgml.tools import is_xml
 
+
+def _fetch_url_directly(url: str) -> str:
+    """
+    Fetch URL content directly with a fresh httpx client, completely bypassing
+    the HTTP cache layer.
+
+    This is used as a retry mechanism when the cached response is empty or invalid.
+    The httpxthrottlecache library reuses a single client instance, so its
+    bypass_cache parameter has no effect after the client is first created.
+    """
+    import httpx
+    from edgar.core import get_identity
+
+    headers = {"User-Agent": get_identity()}
+    with httpx.Client(headers=headers) as client:
+        response = client.get(url)
+        return response.text
+
 __all__ = ['iter_documents', 'list_documents', 'FilingSGML', 'FilingHeader']
 
 
-def read_content(source: Union[str, Path, 'EdgarPath']) -> Iterator[str]:
+def read_content(source: Union[str, Path, 'EdgarPath'], bypass_cache: bool = False) -> Iterator[str]:
     """
     Read content from a URL, file path, or EdgarPath, yielding lines as strings.
     Automatically handles gzip-compressed files with .gz extension.
 
     Args:
         source: Either a URL string, a file path, or an EdgarPath (for cloud storage)
+        bypass_cache: If True, bypass the HTTP cache for URL sources. Defaults to False.
 
     Yields:
         str: Lines of content from the source
@@ -39,7 +58,7 @@ def read_content(source: Union[str, Path, 'EdgarPath']) -> Iterator[str]:
 
     if isinstance(source, str) and (source.startswith('http://') or source.startswith('https://')):
         # Handle URL using stream_with_retry
-        for response in stream_with_retry(source):
+        for response in stream_with_retry(source, bypass_cache=bypass_cache):
             # Process each line from the response and decode from bytes
             for line in response.iter_lines():
                 if line is not None:
@@ -73,13 +92,14 @@ def read_content(source: Union[str, Path, 'EdgarPath']) -> Iterator[str]:
                 yield from file
 
 
-def read_content_as_string(source: Union[str, Path]) -> str:
+def read_content_as_string(source: Union[str, Path], bypass_cache: bool = False) -> str:
     """
     Read content from either a URL or file path into a string.
     Uses existing read_content generator function.
 
     Args:
         source: Either a URL string or a file path
+        bypass_cache: If True, bypass the HTTP cache for URL sources. Defaults to False.
 
     Returns:
         str: Full content as string
@@ -90,7 +110,7 @@ def read_content_as_string(source: Union[str, Path]) -> str:
     """
     # Convert lines from read_content to string
     lines = []
-    for line in read_content(source):
+    for line in read_content(source, bypass_cache=bypass_cache):
         # Handle both string and bytes from response
         if isinstance(line, bytes):
             lines.append(line.decode('utf-8', errors='replace'))
@@ -208,7 +228,7 @@ class FilingSGML:
     Main class that parses and provides access to both the header and documents
     from an SGML filing.
     """
-    __slots__ = ('header', '_documents_by_sequence', '__dict__')  # Use slots for memory efficiency
+    __slots__ = ('header', '_documents_by_sequence', '__dict__', '__weakref__')
 
     def __init__(self, header: FilingHeader, documents: defaultdict[str, List[SGMLDocument]]):
         """
@@ -388,6 +408,9 @@ class FilingSGML:
         Create FilingSGML instance from either a URL or file path.
         Parses both header and documents.
 
+        If the initial fetch returns an empty or truncated response (e.g., from a
+        stale cache entry), automatically retries once with cache bypass for URL sources.
+
         Args:
             source: Either a URL string or a file path
 
@@ -400,6 +423,17 @@ class FilingSGML:
         """
         # Read content once
         content = read_content_as_string(source)
+
+        # If content is empty/truncated and source is a URL, the cache may have stored
+        # a bad response from a transient SEC outage. Retry with a direct fetch.
+        is_url = isinstance(source, str) and source.startswith("http")
+        if is_url and len(content.strip()) < 50:
+            import logging
+            logging.getLogger(__name__).info(
+                f"Cached response is empty/truncated ({len(content)} bytes) for {source}, "
+                f"retrying with direct fetch"
+            )
+            content = _fetch_url_directly(source)
 
         # Parse header and documents
         header, documents = parse_submission_text(content)
@@ -444,6 +478,29 @@ class FilingSGML:
         Direct dictionary lookup for O(1) performance.
         """
         return self._documents_by_name.get(filename)
+
+    @classmethod
+    def from_homepage(cls, homepage: 'FilingHomepage') -> 'FilingSGML':
+        """
+        Create a minimal FilingSGML from a FilingHomepage as a fallback when the
+        full submission text (.txt) is unavailable.
+
+        The resulting instance has an empty header and no in-memory document content,
+        but its attachments property is overridden with the homepage's attachments,
+        which have valid URLs for downloading individual documents.
+
+        Args:
+            homepage: A FilingHomepage loaded from the filing's -index.html page
+
+        Returns:
+            FilingSGML: Minimal instance with homepage-sourced attachments
+        """
+        from edgar.sgml.sgml_header import FilingHeader
+        header = FilingHeader(text="", filing_metadata={})
+        instance = cls(header=header, documents=defaultdict(list))
+        # Override the cached_property with the homepage's attachments directly
+        instance.__dict__['attachments'] = homepage.attachments
+        return instance
 
     @classmethod
     def from_filing(cls, filing: 'Filing') -> 'FilingSGML':

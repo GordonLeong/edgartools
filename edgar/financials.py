@@ -187,7 +187,7 @@ class Financials:
 
             # Filter out abstract rows - they never have values
             if 'abstract' in df.columns:
-                df = df[df['abstract'] == False].copy()
+                df = df[~df['abstract']].copy()
 
             # Get period columns
             period_columns = [col for col in df.columns
@@ -269,7 +269,7 @@ class Financials:
 
             # Filter out abstract rows - they never have values
             if 'abstract' in df.columns:
-                df = df[df['abstract'] == False].copy()
+                df = df[~df['abstract']].copy()
 
             # Find the concept using pattern matching
             for pattern in concept_patterns:
@@ -353,7 +353,7 @@ class Financials:
             Net income value if found, None otherwise
 
         Example:
-            >>> company = Company('AAPL')  
+            >>> company = Company('AAPL')
             >>> financials = company.get_financials()
             >>> net_income = financials.get_net_income()
         """
@@ -361,7 +361,7 @@ class Financials:
             r'Net Income$',                    # Exact match
             r'^Net Income',                    # Starts with
             r'Net Income.*Common',             # Net income attributable to common
-            r'Net Income.*Shareholders',       # Net income attributable to shareholders  
+            r'Net Income.*Shareholders',       # Net income attributable to shareholders
             r'Profit.*Loss',                   # International variations
             r'Net Earnings'                    # Alternative terminology
         ]
@@ -412,13 +412,13 @@ class Financials:
 
         Example:
             >>> company = Company('AAPL')
-            >>> financials = company.get_financials()  
+            >>> financials = company.get_financials()
             >>> total_assets = financials.get_total_assets()
         """
         patterns = [
             r'Total Assets$',      # Exact match
             r'^Total Assets',      # Starts with
-            r'Assets$'             # Just "Assets" 
+            r'Assets$'             # Just "Assets"
         ]
         return self._get_standardized_concept_value('balance', patterns, period_offset)
 
@@ -497,7 +497,7 @@ class Financials:
 
     def get_capital_expenditures(self, period_offset: int = 0) -> Optional[Union[int, float]]:
         """
-        Get capital expenditures from the cash flow statement using standardized labels.
+        Get capital expenditures from the cash flow statement using standardized XBRL concepts.
 
         Args:
             period_offset: Which period to get (0=most recent, 1=previous, etc.)
@@ -505,12 +505,20 @@ class Financials:
         Returns:
             Capital expenditures value if found, None otherwise
         """
+        # First try concept-based search using standardization mappings
+        result = self._get_standardized_concept_by_xbrl(
+            'cashflow',
+            ['Payments for Property, Plant and Equipment'],
+            period_offset
+        )
+
+        if result is not None:
+            return result
+
+        # Fallback to label-based search for edge cases
         patterns = [
             r'Capital Expenditures',
             r'Additions.*property.*equipment',  # MSFT: "Additions to property and equipment"
-            r'Property.*Plant.*Equipment',
-            r'Payments.*Property',
-            r'Acquisitions.*Property',
             r'Purchase.*Property',
             r'Capex'
         ]
@@ -703,7 +711,7 @@ class Financials:
         metrics['operating_income'] = self.get_operating_income()
         metrics['net_income'] = self.get_net_income()
 
-        # Balance Sheet Metrics  
+        # Balance Sheet Metrics
         metrics['total_assets'] = self.get_total_assets()
         metrics['total_liabilities'] = self.get_total_liabilities()
         metrics['stockholders_equity'] = self.get_stockholders_equity()
@@ -730,7 +738,7 @@ class Financials:
 
         if metrics['total_liabilities'] and metrics['total_assets']:
             try:
-                metrics['debt_to_assets'] = metrics['total_liabilities'] / metrics['total_assets'] 
+                metrics['debt_to_assets'] = metrics['total_liabilities'] / metrics['total_assets']
             except (TypeError, ZeroDivisionError):
                 metrics['debt_to_assets'] = None
         else:
@@ -766,6 +774,32 @@ class Financials:
         parts.append(f"• {fact_count:,} facts")
 
         return f"Financials({' '.join(parts)})"
+
+    def get_currency_symbol(self) -> str:
+        """
+        Get the reporting currency symbol for this filing.
+
+        Detects the most common monetary unit from the XBRL units dict.
+        Returns '$' as default if currency cannot be determined.
+        """
+        if self.xb is None:
+            return "$"
+        try:
+            from collections import Counter
+            from edgar.xbrl.core import get_currency_symbol as _get_sym
+            # Count currency measures across all unit definitions
+            currencies = Counter()
+            for unit_info in self.xb.units.values():
+                if unit_info.get('type') == 'simple':
+                    measure = unit_info.get('measure', '')
+                    if measure.startswith('iso4217:'):
+                        currencies[measure] += 1
+            if currencies:
+                most_common = currencies.most_common(1)[0][0]
+                return _get_sym(most_common)
+        except Exception:
+            pass
+        return "$"
 
     def to_context(self) -> str:
         """

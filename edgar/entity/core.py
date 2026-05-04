@@ -6,7 +6,6 @@ including companies, funds, and individuals.
 """
 import re
 from abc import ABC, abstractmethod
-from collections import defaultdict
 from datetime import date
 from functools import cached_property
 from typing import TYPE_CHECKING, Iterable, List, Optional, Tuple, TypeVar, Union
@@ -42,13 +41,12 @@ if TYPE_CHECKING:
     from edgar.enums import FormType
 
 # Import constants and utilities from separate modules
-from edgar.entity.constants import COMPANY_FORMS
+from edgar.entity.constants import COMPANY_FORMS, FILER_TYPE_FOREIGN_FORMS, FILER_TYPE_DOMESTIC_FORMS
 from edgar.entity.utils import has_company_filings, normalize_cik
 
 # TTM (Trailing Twelve Months) imports
-from edgar.ttm.calculator import TTMCalculator, TTMMetric
-from edgar.ttm.statement import TTMStatement, TTMStatementBuilder
-from edgar.ttm.splits import detect_splits, apply_split_adjustments
+from edgar.ttm.calculator import TTMMetric
+from edgar.ttm.statement import TTMStatement
 
 # Type variables for better type annotations
 T = TypeVar('T')
@@ -413,8 +411,8 @@ class Entity(SecFiler):
         Get the entity's filings and optionally filter by multiple criteria.
 
         This method has a special behavior for loading filings. When first called,
-        it only loads the most recent filings. If trigger_full_load=True, it will 
-        automatically fetch all historical filings from the SEC (potentially making 
+        it only loads the most recent filings. If trigger_full_load=True, it will
+        automatically fetch all historical filings from the SEC (potentially making
         multiple API calls) as needed.
 
         Args:
@@ -485,7 +483,7 @@ class Entity(SecFiler):
         except NoCompanyFactsFound:
             return None
 
-    def get_structured_statement(self, 
+    def get_structured_statement(self,
                                 statement_type: str,
                                 fiscal_year: Optional[int] = None,
                                 fiscal_period: Optional[str] = None,
@@ -549,8 +547,8 @@ class Entity(SecFiler):
         return filings.latest(n)
 
     def __str__(self):
-        if hasattr(self, 'data'):
-            return f"Entity({self.data.name} [{self.cik}])"
+        if self._data is not None:
+            return f"Entity({self._data.name} [{self.cik}])"
         return f"Entity(CIK={self.cik})"
 
     def __rich__(self):
@@ -610,14 +608,14 @@ class Company(Entity):
 
     def get_financials(self) -> Optional[Financials]:
         """
-        Get financial statements from this company's latest 10-K annual report.
+        Get financial statements from this company's latest annual report.
 
-        This is the recommended starting point for financial analysis. Returns a
-        Financials object with access to income statement, balance sheet, and
-        cash flow statement — typically covering 3 years of data.
+        Checks 10-K first, then falls back to 20-F (foreign private issuers)
+        and 40-F (Canadian filers). Returns a Financials object with access to
+        income statement, balance sheet, and cash flow statement.
 
         Returns:
-            Financials object, or None if no 10-K filing is available
+            Financials object, or None if no annual filing is available
 
         Example::
 
@@ -630,17 +628,23 @@ class Company(Entity):
         tenk_filing = self.latest_tenk
         if tenk_filing is not None:
             return tenk_filing.financials
+        # Fall back to 20-F (foreign private issuers) and 40-F (Canadian filers)
+        for form in ('20-F', '40-F'):
+            filing = self.get_filings(form=form, amendments=False, trigger_full_load=False).latest()
+            if filing is not None:
+                return Financials.extract(filing)
         return None
 
     def get_quarterly_financials(self) -> Optional[Financials]:
         """
-        Get financial statements from this company's latest 10-Q quarterly report.
+        Get financial statements from this company's latest quarterly report.
 
+        Checks 10-Q first, then falls back to 6-K (foreign private issuers).
         Returns a Financials object with the same interface as get_financials(),
         but with quarterly data instead of annual.
 
         Returns:
-            Financials object, or None if no 10-Q filing is available
+            Financials object, or None if no quarterly filing is available
 
         Example::
 
@@ -651,6 +655,10 @@ class Company(Entity):
         tenq_filing = self.latest_tenq
         if tenq_filing is not None:
             return tenq_filing.financials
+        # Fall back to 6-K (foreign private issuers)
+        filing = self.get_filings(form='6-K', amendments=False, trigger_full_load=False).latest()
+        if filing is not None:
+            return Financials.extract(filing)
         return None
 
     @property
@@ -680,7 +688,8 @@ class Company(Entity):
         Check if this company is incorporated outside the United States.
 
         Uses the SEC state of incorporation code to determine if the company
-        is registered in a foreign jurisdiction.
+        is registered in a foreign jurisdiction. Falls back to filer_type
+        when state of incorporation is not available.
 
         Returns:
             True if incorporated in a foreign country, False if US or unknown
@@ -695,18 +704,23 @@ class Company(Entity):
         if hasattr(self.data, 'state_of_incorporation') and self.data.state_of_incorporation:
             from edgar.reference._codes import is_foreign_company
             return is_foreign_company(self.data.state_of_incorporation)
-        return False
+        # Fallback: use filer_type which checks filed forms
+        return self.filer_type in ('Foreign', 'Canadian')
 
-    @property
+    @cached_property
     def filer_type(self) -> Optional[str]:
         """
-        Get the filer type based on state of incorporation.
+        Get the filer type based on state of incorporation, with fallback to filed forms.
+
+        When the state of incorporation is available, uses that for classification.
+        Otherwise, infers filer type from recent filing forms (10-K → Domestic,
+        20-F → Foreign, 40-F → Canadian).
 
         Returns:
-            'Domestic' - Incorporated in US
-            'Canadian' - Incorporated in Canada
-            'Foreign' - Incorporated elsewhere
-            None - Unknown or state of incorporation not available
+            'Domestic' - Incorporated in US or files 10-K
+            'Canadian' - Incorporated in Canada or files 40-F
+            'Foreign' - Incorporated elsewhere or files 20-F
+            None - Unknown
 
         Example:
             >>> Company('AAPL').filer_type
@@ -716,9 +730,27 @@ class Company(Entity):
             >>> Company('CNQ').filer_type  # Canadian Natural Resources
             'Canadian'
         """
+        # Primary: state_of_incorporation (fast, no network call needed)
         if hasattr(self.data, 'state_of_incorporation') and self.data.state_of_incorporation:
             from edgar.reference._codes import get_filer_type
             return get_filer_type(self.data.state_of_incorporation)
+
+        # Fallback: infer from filed form types
+        # Check order matters: 40-F before 6-K since Canadian filers also file 6-K
+        form_types = self._get_form_types(limit=50)
+        if '40-F' in form_types or '40-F/A' in form_types:
+            return 'Canadian'
+        elif '20-F' in form_types or '20-F/A' in form_types or '6-K' in form_types:
+            return 'Foreign'
+        elif '10-K' in form_types or '10-K/A' in form_types or '10-Q' in form_types:
+            return 'Domestic'
+
+        # Extended fallback: foreign forms (ADR, foreign registration, sovereign)
+        if form_types & FILER_TYPE_FOREIGN_FORMS:
+            return 'Foreign'
+        # Extended fallback: domestic forms (registration, UITs, funds, crowdfunding)
+        if form_types & FILER_TYPE_DOMESTIC_FORMS:
+            return 'Domestic'
         return None
 
     def _get_form_types(self, limit: int = 100) -> set:
@@ -765,7 +797,19 @@ class Company(Entity):
             >>> Company('JPM').business_category
             'Bank'
         """
-        from edgar.entity.categorization import classify_business_category
+        from edgar.entity.categorization import BusinessCategory, classify_business_category, sic_overrides_bdc
+
+        # Check authoritative BDC signal (814- file number), but only if
+        # SIC doesn't definitively indicate another category. Large asset
+        # managers (BX, KKR) and non-financial companies (NEE) can inherit
+        # 814- file numbers from BDC subsidiaries. (GH #774)
+        if getattr(self.data, 'is_bdc', False):
+            try:
+                sic_int = int(self.sic) if self.sic is not None else None
+            except (ValueError, TypeError):
+                sic_int = None
+            if not sic_overrides_bdc(sic_int):
+                return BusinessCategory.BDC.value
 
         form_types = self._get_form_types()
         entity_type = getattr(self.data, 'entity_type', None)
@@ -776,6 +820,41 @@ class Company(Entity):
             name=self.name or '',
             form_types=form_types
         )
+
+    @cached_property
+    def reit_subtype(self) -> Optional[str]:
+        """
+        Classify a REIT as equity or mortgage.
+
+        Mortgage REITs invest in mortgage-backed securities and loans,
+        reporting InterestIncomeExpenseNet as their dominant revenue.
+        Equity REITs own and operate real property.
+
+        Returns None immediately for non-REIT companies (no network call).
+
+        Returns:
+            'equity', 'mortgage', or None (non-REIT)
+
+        Example:
+            >>> Company('PLD').reit_subtype
+            'equity'
+            >>> Company('AGNC').reit_subtype
+            'mortgage'
+            >>> Company('AAPL').reit_subtype  # not a REIT
+        """
+        if self.business_category != 'REIT':
+            return None
+
+        facts = self.get_facts()
+        if not facts:
+            return None
+
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            if facts.get_fact('us-gaap:InterestIncomeExpenseNet') is not None:
+                return 'mortgage'
+        return 'equity'
 
     def is_fund(self) -> bool:
         """
@@ -840,6 +919,29 @@ class Company(Entity):
             return latest_10q.obj()
         return None
 
+    def proxy_season(self, index: int = 0) -> Optional['ProxySeason']:
+        """
+        Get a proxy season for this company.
+
+        A proxy season groups all proxy-related filings around one annual meeting,
+        including the management definitive proxy (DEF 14A or DEFC14A), supplemental
+        materials, preliminary filings, and any contest filings.
+
+        Args:
+            index: 0 = latest season, 1 = previous season, etc.
+
+        Returns:
+            ProxySeason if proxy filings found, None otherwise
+
+        Example:
+            >>> company = Company("AAPL")
+            >>> season = company.proxy_season()
+            >>> print(season.is_contested)
+            False
+        """
+        from edgar.proxy.season import ProxySeason
+        return ProxySeason.for_company(self, index=index)
+
     def get_icon(self):
         return get_icon_from_ticker(self.tickers[0])
 
@@ -859,14 +961,15 @@ class Company(Entity):
             EntityFacts object with SIC code and ticker set, optionally filtered by period type
         """
         facts = super().get_facts(period_type)
-        if facts:
-            # Inject SIC code and ticker for industry-specific statement building
-            # Ticker is used for curated industries like payment_networks where SIC doesn't map well
-            facts._sic_code = self.sic
-            facts._ticker = self.tickers[0] if self.tickers else None
+        if facts and facts._sic_code is None and facts._sic_resolver is None:
+            # Defer SIC/ticker resolution until statement-building time.
+            # This avoids triggering a submissions download just to get metadata
+            # when the user only needs raw facts, shares_outstanding, or TTM metrics.
+            company = self  # capture for closure
+            facts._sic_resolver = lambda: (company.sic, company.tickers[0] if company.tickers else None)
         return facts
 
-    @property
+    @cached_property
     def facts(self) -> Optional['EntityFacts']:
         """Get enhanced structured facts about this company."""
         return self.get_facts()
@@ -886,7 +989,7 @@ class Company(Entity):
 
     @property
     def shares_outstanding(self) -> Optional[float]:
-        """Get the shares outstanding for this company.""" 
+        """Get the shares outstanding for this company."""
         facts = self.facts
         if facts:
             return facts.shares_outstanding
@@ -927,41 +1030,12 @@ class Company(Entity):
             return None
 
         try:
-            if period == 'ttm':
-                # Build TTM statement with split-adjusted facts
-                adjusted_facts = self._get_split_adjusted_facts()
-                adjusted_facts = self._prepare_quarterly_facts(adjusted_facts)
-
-                # TTMEntityFacts removed - using EntityFacts directly
-                ttm_facts = EntityFacts(self.cik, self.name, adjusted_facts, self.sic)
-                builder = TTMStatementBuilder(ttm_facts)
-                stmt = builder.build_income_statement(max_periods=periods)
-
-                if as_dataframe:
-                    return stmt.to_dataframe()
-                return stmt
-
-            elif period == 'quarterly':
-                # Build quarterly statement with derived Q4
-                adjusted_facts = self._get_split_adjusted_facts()
-                adjusted_facts = self._prepare_quarterly_facts(adjusted_facts)
-
-                # TTMEntityFacts removed - using EntityFacts directly
-                ttm_facts = EntityFacts(self.cik, self.name, adjusted_facts, self.sic)
-                return ttm_facts.income_statement(
-                    periods=periods,
-                    annual=False,
-                    as_dataframe=as_dataframe,
-                    concise_format=concise_format
-                )
-
-            else:  # annual
-                return facts.income_statement(
-                    periods=periods,
-                    annual=True,
-                    as_dataframe=as_dataframe,
-                    concise_format=concise_format
-                )
+            return facts.income_statement(
+                periods=periods,
+                period=period,
+                as_dataframe=as_dataframe,
+                concise_format=concise_format
+            )
         except Exception as e:
             from edgar.core import log
             log.debug(f"Error getting income statement for {self.name}: {e}")
@@ -1002,7 +1076,7 @@ class Company(Entity):
             try:
                 return facts.balance_sheet(
                     periods=periods,
-                    annual=(period == 'annual'),
+                    period=period,
                     as_dataframe=as_dataframe,
                     concise_format=concise_format
                 )
@@ -1040,40 +1114,12 @@ class Company(Entity):
             return None
 
         try:
-            if period == 'ttm':
-                adjusted_facts = self._get_split_adjusted_facts()
-                adjusted_facts = self._prepare_quarterly_facts(adjusted_facts)
-
-                # TTMEntityFacts removed - using EntityFacts directly
-                ttm_facts = EntityFacts(self.cik, self.name, adjusted_facts, self.sic)
-                builder = TTMStatementBuilder(ttm_facts)
-                stmt = builder.build_cashflow_statement(max_periods=periods)
-
-                if as_dataframe:
-                    return stmt.to_dataframe()
-                return stmt
-
-            elif period == 'quarterly':
-                # Build quarterly statement with derived Q4
-                adjusted_facts = self._get_split_adjusted_facts()
-                adjusted_facts = self._prepare_quarterly_facts(adjusted_facts)
-
-                # TTMEntityFacts removed - using EntityFacts directly
-                ttm_facts = EntityFacts(self.cik, self.name, adjusted_facts, self.sic)
-                return ttm_facts.cashflow_statement(
-                    periods=periods,
-                    annual=False,
-                    as_dataframe=as_dataframe,
-                    concise_format=concise_format
-                )
-
-            else:  # annual
-                return facts.cashflow_statement(
-                    periods=periods,
-                    annual=True,
-                    as_dataframe=as_dataframe,
-                    concise_format=concise_format
-                )
+            return facts.cashflow_statement(
+                periods=periods,
+                period=period,
+                as_dataframe=as_dataframe,
+                concise_format=concise_format
+            )
         except Exception as e:
             from edgar.core import log
             log.debug(f"Error getting cash flow for {self.name}: {e}")
@@ -1203,132 +1249,6 @@ class Company(Entity):
     # TTM (Trailing Twelve Months) Methods
     # -------------------------------------------------------------------------
 
-    def _get_split_adjusted_facts(self) -> List:
-        """Get all facts, adjusted for stock splits.
-
-        Results are cached to avoid redundant computation when called
-        multiple times (e.g., for income_statement and cash_flow).
-
-        Returns:
-            List of FinancialFact objects with split-adjusted values
-        """
-        # Check cache first
-        cache_attr = '_cached_split_adjusted_facts'
-        if hasattr(self, cache_attr):
-            return getattr(self, cache_attr)
-
-        facts_obj = self.facts
-        if not facts_obj or not facts_obj._facts:
-            return []
-
-        facts = facts_obj._facts
-
-        # Detect and apply split adjustments
-        splits = detect_splits(facts)
-        if splits:
-            facts = apply_split_adjustments(facts, splits)
-
-        # Cache the result
-        object.__setattr__(self, cache_attr, facts)
-        return facts
-
-    def _prepare_quarterly_facts(self, facts: List) -> List:
-        """Enhance facts with derived Q4 data for quarterly analysis.
-
-        Derives Q2, Q3, Q4 from YTD and annual facts when discrete quarters
-        are not available. Also derives Q4 EPS from net income and shares.
-
-        Args:
-            facts: List of FinancialFact objects
-
-        Returns:
-            Original facts plus derived quarterly facts
-        """
-        from edgar.entity.models import FinancialFact
-
-        # Group by concept
-        concept_facts = defaultdict(list)
-        for f in facts:
-            concept_facts[f.concept].append(f)
-
-        derived_facts = []
-
-        # Derive quarterly data for each concept
-        for _, c_facts in concept_facts.items():
-            try:
-                calc = TTMCalculator(c_facts)
-                quarterly = calc._quarterize_facts()
-
-                # Add only derived quarters
-                for qf in quarterly:
-                    if qf.calculation_context and 'derived' in qf.calculation_context:
-                        derived_facts.append(qf)
-            except (ValueError, KeyError, AttributeError, IndexError, TypeError):
-                # Skip concepts that can't be quarterized (e.g., insufficient data, balance sheet items)
-                continue
-
-        # Derive EPS for Q4 using Net Income and Shares
-        def _collect_facts(concepts: List[str]) -> List[FinancialFact]:
-            collected = []
-            for name in concepts:
-                if name in concept_facts:
-                    collected.extend(concept_facts[name])
-                for prefix in ['us-gaap', 'ifrs-full']:
-                    prefixed = f"{prefix}:{name}"
-                    if prefixed in concept_facts:
-                        collected.extend(concept_facts[prefixed])
-            return collected
-
-        net_income_facts = _collect_facts([
-            "NetIncomeLoss",
-            "NetIncomeLossAvailableToCommonStockholdersBasic",
-        ])
-
-        shares_basic = _collect_facts([
-            "WeightedAverageNumberOfSharesOutstandingBasic",
-            "WeightedAverageNumberOfSharesOutstandingBasicAndDiluted",
-        ])
-        shares_diluted = _collect_facts([
-            "WeightedAverageNumberOfDilutedSharesOutstanding",
-            "WeightedAverageNumberOfSharesOutstandingDiluted",
-        ])
-
-        def _has_eps_for_period(concept_name: str, period_end: date, fiscal_period: str) -> bool:
-            candidates = [concept_name]
-            if ":" in concept_name:
-                candidates.append(concept_name.split(":", 1)[1])
-            else:
-                candidates.append(f"us-gaap:{concept_name}")
-                candidates.append(f"ifrs-full:{concept_name}")
-
-            for name in candidates:
-                for fact in concept_facts.get(name, []):
-                    if (fact.period_end == period_end and
-                        fact.fiscal_period == fiscal_period and
-                        fact.period_type == "duration"):
-                        return True
-            return False
-
-        # Derive basic EPS
-        if net_income_facts and shares_basic:
-            calc = TTMCalculator(net_income_facts)
-            for eps_fact in calc.derive_eps_for_quarter(
-                net_income_facts, shares_basic, "us-gaap:EarningsPerShareBasic"
-            ):
-                if not _has_eps_for_period(eps_fact.concept, eps_fact.period_end, eps_fact.fiscal_period):
-                    derived_facts.append(eps_fact)
-
-        # Derive diluted EPS
-        if net_income_facts and shares_diluted:
-            calc = TTMCalculator(net_income_facts)
-            for eps_fact in calc.derive_eps_for_quarter(
-                net_income_facts, shares_diluted, "us-gaap:EarningsPerShareDiluted"
-            ):
-                if not _has_eps_for_period(eps_fact.concept, eps_fact.period_end, eps_fact.fiscal_period):
-                    derived_facts.append(eps_fact)
-
-        return facts + derived_facts
-
     def get_ttm(self, concept: str, as_of: Optional[Union[date, str]] = None) -> TTMMetric:
         """Calculate Trailing Twelve Months value for a concept.
 
@@ -1351,23 +1271,10 @@ class Company(Entity):
             >>> ttm = company.get_ttm("Revenues")
             >>> print(f"TTM Revenue: ${ttm.value / 1e9:.1f}B")
         """
-        facts = self._get_split_adjusted_facts()
-
-        # Handle concept name normalization
-        if ':' not in concept:
-            concept_candidates = [concept, f'us-gaap:{concept}', f'ifrs-full:{concept}']
-        else:
-            concept_candidates = [concept]
-
-        target_facts = [f for f in facts if f.concept in concept_candidates]
-
-        if not target_facts:
-            raise KeyError(f"Concept '{concept}' not found in facts")
-
-        calc = TTMCalculator(target_facts)
-        as_of_date = self._parse_ttm_date(as_of)
-
-        return calc.calculate_ttm(as_of=as_of_date)
+        facts = self.facts
+        if not facts:
+            raise KeyError("No company facts available")
+        return facts.get_ttm(concept, as_of)
 
     def get_ttm_revenue(self, as_of: Optional[Union[date, str]] = None) -> TTMMetric:
         """Get Trailing Twelve Months revenue.
@@ -1383,18 +1290,10 @@ class Company(Entity):
         Raises:
             KeyError: If no revenue concept found
         """
-        revenue_concepts = [
-            'RevenueFromContractWithCustomerExcludingAssessedTax',
-            'Revenues',
-            'SalesRevenueNet',
-            'Revenue'
-        ]
-        for concept in revenue_concepts:
-            try:
-                return self.get_ttm(concept, as_of)
-            except KeyError:
-                continue
-        raise KeyError("Could not find revenue concept in company facts")
+        facts = self.facts
+        if not facts:
+            raise KeyError("No company facts available")
+        return facts.get_ttm_revenue(as_of)
 
     def get_ttm_net_income(self, as_of: Optional[Union[date, str]] = None) -> TTMMetric:
         """Get Trailing Twelve Months net income.
@@ -1410,81 +1309,20 @@ class Company(Entity):
         Raises:
             KeyError: If no net income concept found
         """
-        income_concepts = ['NetIncomeLoss', 'NetIncome', 'ProfitLoss']
-        for concept in income_concepts:
-            try:
-                return self.get_ttm(concept, as_of)
-            except KeyError:
-                continue
-        raise KeyError("Could not find net income concept in company facts")
-
-    def _parse_ttm_date(self, as_of: Optional[Union[date, str]]) -> Optional[date]:
-        """Parse TTM 'as_of' parameter into a date object.
-
-        Args:
-            as_of: Date, ISO string 'YYYY-MM-DD', or quarter string 'YYYY-QN'
-
-        Returns:
-            Parsed date or None if as_of is None
-
-        Raises:
-            TypeError: If as_of is not a date, str, or None
-            ValueError: If string format is invalid or values are out of range
-        """
-        if as_of is None:
-            return None
-
-        if isinstance(as_of, date):
-            return as_of
-
-        if not isinstance(as_of, str):
-            raise TypeError(f"as_of must be date, str, or None, got {type(as_of).__name__}")
-
-        # Try ISO format: YYYY-MM-DD
-        if '-' in as_of and len(as_of.split('-')) == 3:
-            try:
-                parsed = date.fromisoformat(as_of)
-                # Validate reasonable year range
-                if parsed.year < 1900 or parsed.year > 2100:
-                    raise ValueError(f"Year must be between 1900 and 2100, got {parsed.year}")
-                return parsed
-            except ValueError as e:
-                if "year" in str(e).lower():
-                    raise
-                raise ValueError(f"Invalid date format: '{as_of}'. Expected ISO format YYYY-MM-DD") from e
-
-        # Try quarter format: YYYY-QN
-        parts = as_of.upper().split('-')
-        if len(parts) == 2 and 'Q' in parts[1]:
-            try:
-                year = int(parts[0])
-                if year < 1900 or year > 2100:
-                    raise ValueError(f"Year must be between 1900 and 2100, got {year}")
-
-                q = int(parts[1].replace('Q', ''))
-                if q not in (1, 2, 3, 4):
-                    raise ValueError(f"Quarter must be 1-4, got {q}")
-
-                # Map to quarter end dates
-                quarter_ends = {1: (3, 31), 2: (6, 30), 3: (9, 30), 4: (12, 31)}
-                month, day = quarter_ends[q]
-                return date(year, month, day)
-            except ValueError:
-                raise
-            except (TypeError, KeyError) as e:
-                raise ValueError(f"Invalid quarter format: '{as_of}'. Expected YYYY-QN (e.g., '2024-Q2')") from e
-
-        raise ValueError(f"Invalid date format: '{as_of}'. Use 'YYYY-MM-DD' or 'YYYY-QN'")
+        facts = self.facts
+        if not facts:
+            raise KeyError("No company facts available")
+        return facts.get_ttm_net_income(as_of)
 
     def __str__(self):
-        if hasattr(self, 'data') and self.data.name:
+        if self._data is not None and self._data.name:
             # Handle individuals (persons)
-            if self.data.is_individual:
+            if self._data.is_individual:
                 return f"{self.display_name} (Person) CIK:{self.cik}"
 
             # Company format
             ticker = self.get_ticker()
-            parts = [self.data.name]
+            parts = [self._data.name]
             if ticker:
                 parts.append(f"[{ticker}]")
             parts.append(f"CIK:{self.cik}")
@@ -1657,7 +1495,7 @@ class Company(Entity):
     def __rich__(self):
         """Creates a rich representation of the company with detailed information.
 
-        Design follows the EdgarTools display language (docs/internal/design-language.md):
+        Design follows the EdgarTools display language:
         - Single outer border (card-based) with box.ROUNDED
         - No emojis - uses unicode symbols from SYMBOLS
         - Semantic colors from edgar.display.styles

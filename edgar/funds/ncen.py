@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 from decimal import Decimal
-from functools import lru_cache
 from typing import Any, List, Optional, Union
 
 import pandas as pd
@@ -262,9 +261,20 @@ class FundCensus:
         self.registrant = registrant
         self.series = series
         self.signature_info = signature_info
+        self._filing = None
+        self._series_data = None
+        self._service_providers = None
+        self._broker_data = None
+        self._director_data = None
+        self._etf_data = None
 
     def __str__(self):
         return f"FundCensus({self.name}, {self.report_date}, {self.num_series} series)"
+
+    @property
+    def filing(self):
+        """The source Filing object, if this report was created via from_filing()."""
+        return self._filing
 
     @property
     def name(self) -> str:
@@ -277,6 +287,16 @@ class FundCensus:
     @property
     def lei(self) -> Optional[str]:
         return self.registrant.lei
+
+    @property
+    def series_ids(self) -> List[str]:
+        """All series IDs in this census."""
+        return [s.series_id for s in self.series]
+
+    @property
+    def series_id(self) -> Optional[str]:
+        """Primary (first) series ID, or None if no series."""
+        return self.series[0].series_id if self.series else None
 
     @property
     def num_series(self) -> int:
@@ -298,9 +318,10 @@ class FundCensus:
     # DataFrame methods
     # -------------------------------------------------------------------
 
-    @lru_cache(maxsize=1)
     def series_data(self) -> pd.DataFrame:
         """Summary of all fund series."""
+        if self._series_data is not None:
+            return self._series_data
         data = []
         for s in self.series:
             data.append({
@@ -314,11 +335,13 @@ class FundCensus:
                 "num_custodians": len(s.custodians),
                 "has_etf": s.etf_info is not None,
             })
-        return pd.DataFrame(data)
+        self._series_data = pd.DataFrame(data)
+        return self._series_data
 
-    @lru_cache(maxsize=1)
     def service_providers(self) -> pd.DataFrame:
         """All service providers flattened across series."""
+        if self._service_providers is not None:
+            return self._service_providers
         data = []
         for s in self.series:
             for provider in (s.advisers + s.custodians + s.transfer_agents +
@@ -331,11 +354,13 @@ class FundCensus:
                     "lei": provider.lei,
                     "affiliated": provider.is_affiliated,
                 })
-        return pd.DataFrame(data)
+        self._service_providers = pd.DataFrame(data)
+        return self._service_providers
 
-    @lru_cache(maxsize=1)
     def broker_data(self) -> pd.DataFrame:
         """Broker-dealer and broker commission data across series."""
+        if self._broker_data is not None:
+            return self._broker_data
         data = []
         for s in self.series:
             for bd in s.broker_dealers:
@@ -356,11 +381,13 @@ class FundCensus:
                     "lei": b.lei,
                     "commission": b.commission,
                 })
-        return pd.DataFrame(data)
+        self._broker_data = pd.DataFrame(data)
+        return self._broker_data
 
-    @lru_cache(maxsize=1)
     def director_data(self) -> pd.DataFrame:
         """Board of directors."""
+        if self._director_data is not None:
+            return self._director_data
         data = []
         for d in self.registrant.directors:
             data.append({
@@ -368,11 +395,13 @@ class FundCensus:
                 "crd_number": d.crd_number,
                 "interested_person": d.is_interested_person,
             })
-        return pd.DataFrame(data)
+        self._director_data = pd.DataFrame(data)
+        return self._director_data
 
-    @lru_cache(maxsize=1)
     def etf_data(self) -> pd.DataFrame:
         """ETF-specific data for series that are exchange-traded."""
+        if self._etf_data is not None:
+            return self._etf_data
         data = []
         for s in self.series:
             if s.etf_info is not None:
@@ -388,7 +417,8 @@ class FundCensus:
                     "is_in_kind": etf.is_in_kind,
                     "num_authorized_participants": len(etf.authorized_participants),
                 })
-        return pd.DataFrame(data)
+        self._etf_data = pd.DataFrame(data)
+        return self._etf_data
 
     # -------------------------------------------------------------------
     # Rich display
@@ -457,6 +487,62 @@ class FundCensus:
             max_rows=20,
         )
 
+    def to_context(self, detail: str = 'standard') -> str:
+        """
+        AI-optimized context string.
+
+        Args:
+            detail: 'minimal' (~100 tokens), 'standard' (~300 tokens), 'full' (~500+ tokens)
+        """
+        lines = []
+
+        # === IDENTITY ===
+        lines.append(f"FUNDCENSUS: {self.name}")
+        lines.append("")
+
+        # === CORE METADATA ===
+        lines.append(f"Report Date: {self.report_date}")
+        lines.append(f"Series: {self.num_series}")
+        if self.classification_type:
+            lines.append(f"Classification: {self.classification_type}")
+        if self.is_etf_company:
+            lines.append("ETF Company: Yes")
+
+        if detail == 'minimal':
+            return "\n".join(lines)
+
+        # === STANDARD ===
+        lines.append(f"CIK: {self.cik}")
+
+        lines.append("")
+        lines.append("AVAILABLE ACTIONS:")
+        lines.append("  .series_data()             Series overview DataFrame")
+        lines.append("  .service_providers()       All service providers DataFrame")
+        lines.append("  .broker_data()             Broker-dealer commissions")
+        lines.append("  .director_data()           Board directors with CRD")
+        lines.append("  .etf_data()                ETF-specific series data")
+        lines.append("  .series                    List of FundSeriesInfo objects")
+
+        if detail == 'standard':
+            return "\n".join(lines)
+
+        # === FULL ===
+        try:
+            sd = self.series_data()
+            if sd is not None and len(sd) > 0:
+                lines.append("")
+                lines.append("SERIES:")
+                for _, row in sd.head(8).iterrows():
+                    name = row.get('name', '?')
+                    ftype = row.get('fund_type', '')
+                    lines.append(f"  {name}" + (f" ({ftype})" if ftype else ""))
+                if len(sd) > 8:
+                    lines.append(f"  ... ({len(sd) - 8} more)")
+        except Exception:
+            pass
+
+        return "\n".join(lines)
+
     def __rich__(self):
         title = f"{self.registrant.name}  {self.report_date}"
         return Panel(
@@ -482,7 +568,10 @@ class FundCensus:
         xml = filing.xml()
         if not xml:
             return None
-        return cls._parse_xml(xml)
+        report = cls._parse_xml(xml)
+        if report is not None:
+            report._filing = filing
+        return report
 
     @classmethod
     def _parse_xml(cls, xml: Union[str, Any]) -> 'FundCensus':

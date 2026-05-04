@@ -14,7 +14,6 @@ import pytest
 from edgar import Company
 
 
-@pytest.mark.vcr
 class TestIFRSConceptDiscovery:
     """Verify that IFRS filers can use the standardization layer."""
 

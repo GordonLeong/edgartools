@@ -10,7 +10,7 @@ from _thread import interrupt_main
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date
-from functools import lru_cache, partial, wraps
+from functools import cached_property, lru_cache, partial, wraps
 from pathlib import Path
 from typing import Callable, Iterable, List, Optional, Tuple, TypeVar, Union
 
@@ -123,8 +123,7 @@ class EdgarSettings:
     max_connections: int
     retries: int = 3
 
-    @property
-    @lru_cache(maxsize=1)
+    @cached_property
     def limits(self):
         return httpx.Limits(max_connections=default_max_connections)
 
@@ -183,7 +182,7 @@ def set_identity(user_identity: str):
     log.info("Identity of the Edgar REST client set to [%s]", user_identity)
 
     from edgar.httpclient import close_clients
-    close_clients() # close any httpx clients, to reset the identity. 
+    close_clients() # close any httpx clients, to reset the identity.
 
 
 identity_prompt = """
@@ -195,8 +194,8 @@ See https://www.sec.gov/os/accessing-edgar-data
 
 This can be set in the environment variable [bold green]EDGAR_IDENTITY[/bold green].
 
-1. Set an OS environment variable 
-    [bold]EDGAR_IDENTITY=[green]Name email@domain.com[/green][/bold] 
+1. Set an OS environment variable
+    [bold]EDGAR_IDENTITY=[green]Name email@domain.com[/green][/bold]
 2. Or a Python environment variable
     import os
     [bold]os.environ['EDGAR_IDENTITY']=[green]"Name email@domain.com"[/green][/bold]
@@ -634,8 +633,8 @@ def has_html_content(content: str) -> bool:
 T = TypeVar('T')
 R = TypeVar('R')
 
-def parallel_thread_map(func: Callable[[T], R], 
-                        items: Iterable[T], 
+def parallel_thread_map(func: Callable[[T], R],
+                        items: Iterable[T],
                         **kwargs) -> List[R]:
     """
     Run a function in parallel across multiple items using ThreadPoolExecutor.
@@ -677,13 +676,20 @@ def initialize_rich_logging():
         handlers=[RichHandler(rich_tracebacks=True)]
     )
 
-    # Turn down 3rd party logging
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpxthrottlecache").setLevel(logging.WARNING)
-    logging.getLogger("pyrate_limiter").setLevel(
-        logging.CRITICAL
-    )  # TODO: Temporary, until next pyrate_limiter update that reduces the spurious "async" message
+    # Third-party loggers already suppressed at module level
 
+
+# Suppress noisy third-party loggers by default.
+# Users can override after import: logging.getLogger("httpx").setLevel(logging.DEBUG)
+_NOISY_LOGGERS = {
+    "httpx": logging.WARNING,
+    "httpxthrottlecache": logging.WARNING,
+    "pyrate_limiter": logging.CRITICAL,  # Emits spurious "async" messages at WARNING
+}
+for _logger_name, _level in _NOISY_LOGGERS.items():
+    _lg = logging.getLogger(_logger_name)
+    if _lg.level == logging.NOTSET:  # Only set if user hasn't already configured
+        _lg.setLevel(_level)
 
 # Turn on rich logging if the environment variable is set
 if os.getenv('EDGAR_USE_RICH_LOGGING', '0') == '1':

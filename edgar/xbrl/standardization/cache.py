@@ -48,6 +48,35 @@ class StandardizationCache:
         self._label_cache: Dict[Tuple[str, str, str], Optional[str]] = {}
         # Cache: statement_type -> standardized data list
         self._statement_cache: Dict[str, List[Dict[str, Any]]] = {}
+        # Industry code for industry-specific overrides (Fama-French 48)
+        self._industry: Optional[str] = None
+
+    @property
+    def industry(self) -> Optional[str]:
+        """Get the Fama-French 48 industry code for this entity."""
+        return self._industry
+
+    @industry.setter
+    def industry(self, value: Optional[str]):
+        """Set industry code. Clears cached standardization results."""
+        if value != self._industry:
+            self._industry = value
+            self.clear_cache()
+
+    def set_industry_from_sic(self, sic_code) -> Optional[str]:
+        """
+        Set industry from a SIC code using Fama-French 48 classification.
+
+        Args:
+            sic_code: SIC code as int or string (e.g., 6020 or "6020")
+
+        Returns:
+            The resolved FF48 industry code, or None if SIC doesn't map
+        """
+        from edgar.xbrl.standardization.sic_industry import sic_str_to_fama_french
+        code = sic_str_to_fama_french(str(sic_code)) if sic_code else None
+        self.industry = code
+        return code
 
     @property
     def mapper(self) -> 'ConceptMapper':
@@ -117,14 +146,15 @@ class StandardizationCache:
         if use_cache and statement_type in self._statement_cache:
             return self._statement_cache[statement_type]
 
-        # Add statement type context to each item
+        # Add statement type context to each item (only if not already set)
         for item in raw_data:
-            item['statement_type'] = statement_type
+            if 'statement_type' not in item:
+                item['statement_type'] = statement_type
 
         # Late import to avoid circular dependency
         from edgar.xbrl.standardization import standardize_statement
         # Standardize using the module function (which uses our singleton mapper)
-        standardized = standardize_statement(raw_data, self.mapper)
+        standardized = standardize_statement(raw_data, self.mapper, industry=self._industry)
 
         # Cache the result
         if use_cache:

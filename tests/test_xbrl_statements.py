@@ -1,4 +1,5 @@
 pytest_plugins = ["tests.fixtures.xbrl2_fixtures"]
+import datetime
 from pathlib import Path
 
 import pytest
@@ -36,6 +37,23 @@ def aapl_xbrl_2022():
 def unp_xbrl():
     data_dir = Path("data/xbrl/datafiles/unp")
     return XBRL.from_directory(data_dir)
+
+def test_xbrl_entity_info_and_dei(aapl_xbrl):
+    """Consolidated from test_xbrl.py: DEI entity data, period_of_report, and report type flags."""
+    # Period of report (exact value)
+    assert aapl_xbrl.period_of_report == '2023-09-30'
+
+    # DEI entity info (5 exact values)
+    assert aapl_xbrl.entity_info.get('entity_name') == 'Apple Inc.'
+    assert aapl_xbrl.entity_info.get('identifier') == '320193'
+    assert aapl_xbrl.entity_info.get('reporting_end_date') == datetime.date(2023, 10, 20)
+    assert aapl_xbrl.entity_info.get('fiscal_year') == '2023'
+    assert aapl_xbrl.entity_info.get('fiscal_period') == 'FY'
+
+    # Report type flags
+    assert aapl_xbrl.entity_info.get('annual_report')
+    assert not aapl_xbrl.entity_info.get('quarterly_report')
+
 
 def test_dimensioned_statement(aapl_xbrl):
     statements = aapl_xbrl.statements
@@ -153,7 +171,8 @@ def test_xbrls_cashflow_to_dataframe(aapl_xbrl, aapl_xbrl_2022):
     xbs = XBRLS([aapl_xbrl, aapl_xbrl_2022])
     cashflow = xbs.statements.cashflow_statement()
     assert cashflow.periods == ['2023-09-30', '2022-09-24']
-    df = cashflow.to_dataframe()
+    # Use presentation=False to assert raw XBRL instance values
+    df = cashflow.to_dataframe(presentation=False)
     columns = df.columns.tolist()
     print(columns)
     labels = df.label.tolist()
@@ -172,7 +191,7 @@ def test_xbrls_balancesheet_to_dataframe(aapl_xbrl, aapl_xbrl_2022):
     assert balance_sheet.periods == ['2023-09-30', '2022-09-24']
     df = balance_sheet.to_dataframe()
     columns = df.columns.tolist()
-    assert columns == ['label', 'concept', 'standard_concept', '2023-09-30', '2022-09-24']
+    assert columns == ['label', 'concept', 'standard_concept', '2023-09-30', '2022-09-24', 'preferred_sign']
     labels = df.label.tolist()
     print(labels)
     # Check using concept filter instead of label since labels are now original company labels
@@ -264,7 +283,9 @@ def test_cashflow_statement_totals():
                      "us-gaap_NetCashProvidedByUsedInInvestingActivities",
                      "us-gaap_NetCashProvidedByUsedInFinancingActivities"]
     idx = df.concept.isin(main_concepts)
-    cols = ["concept", "label", "2024-12-31"]
+    # Column now includes period qualifier e.g. "2024-12-31 (FY)"
+    fy_col = next(c for c in df.columns if c.startswith('2024-12-31'))
+    cols = ["concept", "label", fy_col]
     cash_totals = df[idx][cols]
     assert len(cash_totals) == 3
     print(cash_totals)

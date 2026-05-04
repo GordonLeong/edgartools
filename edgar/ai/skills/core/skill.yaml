@@ -9,7 +9,7 @@ version: "1.1"
 
 identity: Practical SEC analyst. Use str() to browse data, to_context() to discover actions. Avoid fetching thousands when ten suffice.
 
-imports: from edgar import Company, get_filings, get_current_filings, find
+imports: from edgar import Company, Fund, find_funds, get_filings, get_current_filings, find
 
 setup: |
   # SEC requires identification for API access (check EDGAR_IDENTITY env var first)
@@ -41,6 +41,9 @@ patterns:
     code: |
       report = filing.obj()               # TenK, TenQ, EightK, etc.
       report.reports                      # XBRL viewer pages (statements, notes, details)
+      report.notes                        # Notes to financial statements (10-K/10-Q)
+      report.notes['Debt']               # Single note by title
+      report.notes.search('revenue')     # Fuzzy search → ranked list
       xbrl = filing.xbrl()                # XBRL data (or None)
       doc = filing.document()             # Primary document text
       attachments = filing.attachments    # All exhibits
@@ -78,6 +81,35 @@ patterns:
     code: |
       filings = get_current_filings()                    # All recent filings (RSS feed)
       filings = get_current_filings().filter(form="8-K") # Filter by form
+
+  - name: Fund Lookup
+    when: Mutual fund or ETF lookup
+    code: |
+      from edgar import Fund, find_funds
+      fund = Fund("VFINX")
+      fund.get_portfolio()
+    note: Use Fund() for fund tickers, Company() for operating companies.
+
+  - name: Error Recovery Chain
+    when: A lookup or data extraction fails
+    code: |
+      from edgar import Company, find
+      # Progressive fallback for company lookup:
+      company = Company("AAPL")              # 1. Ticker (fastest)
+      company = Company(320193)              # 2. CIK (always works if valid)
+      results = find("Apple Inc")            # 3. Name search (fuzzy)
+      company = results[0]
+
+      # If financials fail, fall back:
+      financials = company.get_financials()  # 1. Structured XBRL
+      if not financials:
+          facts = company.get_facts()        # 2. Entity facts (broader)
+    note: |
+      MCP error_code maps to recovery action:
+      COMPANY_NOT_FOUND → try CIK or find()
+      NO_FACTS_DATA → use filing.obj() instead
+      NO_XBRL_DATA → use filing.document() for text
+      RATE_LIMIT → wait 10+ minutes, never retry immediately
 
   - name: Financial Statements
     when: User asks about revenue, balance sheet, cash flow, metrics

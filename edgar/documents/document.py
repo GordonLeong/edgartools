@@ -19,6 +19,7 @@ from rich.text import Text
 from edgar.documents.nodes import Node, SectionNode
 from edgar.documents.table_nodes import TableNode
 from edgar.documents.types import SearchResult, XBRLFact
+from edgar.documents.utils.anchor_targets import find_anchor_targets, is_anchor_match
 from edgar.richtools import repr_rich
 
 logger = logging.getLogger(__name__)
@@ -255,8 +256,8 @@ class Section:
 
             boundary = extractor.section_boundaries[self.name]
 
-            # Find start anchor
-            start_elements = tree.xpath(f'//*[@id="{boundary.anchor_id}"]')
+            # Find start anchor by id or legacy name attribute
+            start_elements = find_anchor_targets(tree, boundary.anchor_id)
             if not start_elements:
                 return ""
 
@@ -268,15 +269,13 @@ class Section:
                 if not hasattr(el, 'get'):
                     continue
 
-                el_id = el.get('id', '')
-
                 # Check if we've reached the start anchor
-                if el_id == boundary.anchor_id:
+                if is_anchor_match(el, boundary.anchor_id):
                     in_range = True
                     continue
 
                 # Check if we've reached the end boundary
-                if boundary.end_element_id and el_id == boundary.end_element_id:
+                if boundary.end_element_id and is_anchor_match(el, boundary.end_element_id):
                     break
 
                 # Collect elements in range
@@ -327,10 +326,10 @@ class Section:
         """
         Parse section name to extract part and item identifiers.
 
-        Handles both 10-Q part-aware names and 10-K simple names.
+        Handles both internal underscore names and display-style TOC names.
 
         Args:
-            section_name: Section identifier (e.g., "part_i_item_1", "item_1a", "risk_factors")
+            section_name: Section identifier (e.g., "part_i_item_1", "item_1a", "Item 1A", "Part II Item 9A")
 
         Returns:
             Tuple of (part, item) where:
@@ -344,22 +343,30 @@ class Section:
             ("II", "1A")
             >>> Section.parse_section_name("item_7")
             (None, "7")
+            >>> Section.parse_section_name("Item 7A")
+            (None, "7A")
+            >>> Section.parse_section_name("Part II Item 9A")
+            ("II", "9A")
             >>> Section.parse_section_name("risk_factors")
             (None, None)
         """
         import re
 
-        section_lower = section_name.lower()
+        section_lower = section_name.lower().strip()
 
-        # Match 10-Q format: "part_i_item_1", "part_ii_item_1a"
-        part_item_match = re.match(r'part_([ivx]+)_item_(\d+[a-z]?)', section_lower)
+        # Match part-aware formats:
+        # - "part_i_item_1", "part_ii_item_1a"
+        # - "Part I Item 1", "Part II Item 9A"
+        part_item_match = re.match(r'part[\s_]+([ivx]+)[\s_]+item[\s_]+(\d+[a-z]?)\b', section_lower)
         if part_item_match:
             part_roman = part_item_match.group(1).upper()
             item_num = part_item_match.group(2).upper()
             return (part_roman, item_num)
 
-        # Match 10-K format: "item_1", "item_1a", "item_7"
-        item_match = re.match(r'item_(\d+[a-z]?)', section_lower)
+        # Match item-only formats:
+        # - "item_1", "item_1a", "item_7"
+        # - "Item 1", "Item 1A", "Item 7A"
+        item_match = re.match(r'item[\s_]+(\d+[a-z]?)\b', section_lower)
         if item_match:
             item_num = item_match.group(1).upper()
             return (None, item_num)
@@ -593,7 +600,7 @@ class Sections(Dict[str, Section]):
 class Document:
     """
     Main document class.
-    
+
     Represents a parsed HTML document with methods for content extraction,
     search, and transformation.
     """
@@ -675,7 +682,7 @@ class Document:
             self._xbrl_facts = self._extract_xbrl_facts()
         return self._xbrl_facts
 
-    def text(self, 
+    def text(self,
              clean: bool = True,
              include_tables: bool = True,
              include_metadata: bool = False,
@@ -683,7 +690,7 @@ class Document:
              table_max_col_width: Optional[int] = None) -> str:
         """
         Extract text from document.
-        
+
         Args:
             clean: Clean and normalize text
             include_tables: Include table content in text
@@ -692,12 +699,12 @@ class Document:
             table_max_col_width: Maximum column width for table rendering (default: 200).
                                 Set higher (e.g., 500) to avoid truncating long table labels,
                                 or None for unlimited width. Useful for AI/LLM processing.
-            
+
         Returns:
             Extracted text
         """
         # Use cache if available and parameters match
-        if (self._text_cache is not None and 
+        if (self._text_cache is not None and
             clean and not include_tables and not include_metadata and max_length is None):
             return self._text_cache
 
@@ -716,7 +723,7 @@ class Document:
         )
         text = extractor.extract(self)
 
-        # Apply navigation link filtering when cleaning 
+        # Apply navigation link filtering when cleaning
         if clean:
             # Use cached/integrated navigation filtering (optimized approach)
             try:
@@ -810,22 +817,22 @@ class Document:
             return section.text()
         return None
 
-    def get_sec_section(self, section_name: str, clean: bool = True, 
+    def get_sec_section(self, section_name: str, clean: bool = True,
                        include_subsections: bool = True) -> Optional[str]:
         """
         Extract content from a specific SEC filing section using anchor analysis.
-        
+
         Args:
             section_name: Section name (e.g., "Item 1", "Item 1A", "Part I")
             clean: Whether to apply text cleaning and navigation filtering
             include_subsections: Whether to include subsections
-            
+
         Returns:
             Section text content or None if section not found
-            
+
         Examples:
             >>> doc.get_sec_section("Item 1")  # Business description
-            >>> doc.get_sec_section("Item 1A") # Risk factors  
+            >>> doc.get_sec_section("Item 1A") # Risk factors
             >>> doc.get_sec_section("Item 7")  # MD&A
         """
         # Lazy-load section extractor
@@ -840,10 +847,10 @@ class Document:
     def get_available_sec_sections(self) -> List[str]:
         """
         Get list of SEC sections available for extraction.
-        
+
         Returns:
             List of section names that can be passed to get_sec_section()
-            
+
         Example:
             >>> sections = doc.get_available_sec_sections()
             >>> print(sections)
@@ -858,10 +865,10 @@ class Document:
     def get_sec_section_info(self, section_name: str) -> Optional[Dict]:
         """
         Get detailed information about an SEC section.
-        
+
         Args:
             section_name: Section name to look up
-            
+
         Returns:
             Dict with section metadata including anchor info
         """
@@ -873,17 +880,17 @@ class Document:
 
     def to_markdown(self) -> str:
         """Convert document to Markdown."""
-        from edgar.documents.renderers.markdown_renderer import MarkdownRenderer
+        from edgar.documents.renderers.markdown import MarkdownRenderer
         renderer = MarkdownRenderer()
         return renderer.render(self)
 
     def to_json(self, include_content: bool = True) -> Dict[str, Any]:
         """
         Convert document to JSON.
-        
+
         Args:
             include_content: Include full content or just structure
-            
+
         Returns:
             JSON-serializable dictionary
         """
@@ -919,7 +926,7 @@ class Document:
     def to_dataframe(self) -> 'pd.DataFrame':
         """
         Convert document tables to pandas DataFrame.
-        
+
         Returns a DataFrame with all tables concatenated.
         """
         import pandas as pd
@@ -944,11 +951,11 @@ class Document:
     def chunks(self, chunk_size: int = 512, overlap: int = 128) -> Iterator['DocumentChunk']:
         """
         Generate document chunks for processing.
-        
+
         Args:
             chunk_size: Target chunk size in tokens
             overlap: Overlap between chunks
-            
+
         Yields:
             Document chunks
         """
@@ -956,25 +963,25 @@ class Document:
         extractor = ChunkExtractor(chunk_size=chunk_size, overlap=overlap)
         return extractor.extract(self)
 
-    def prepare_for_llm(self, 
+    def prepare_for_llm(self,
                        max_tokens: int = 4000,
                        preserve_structure: bool = True,
                        focus_sections: Optional[List[str]] = None) -> 'LLMDocument':
         """
         Prepare document for LLM processing.
-        
+
         Args:
             max_tokens: Maximum tokens
             preserve_structure: Preserve document structure
             focus_sections: Sections to focus on
-            
+
         Returns:
             LLM-optimized document
         """
         from edgar.documents.ai.llm_optimizer import LLMOptimizer
         optimizer = LLMOptimizer()
         return optimizer.optimize(
-            self, 
+            self,
             max_tokens=max_tokens,
             preserve_structure=preserve_structure,
             focus_sections=focus_sections
@@ -1056,7 +1063,7 @@ class Document:
     def validate(self) -> List[str]:
         """
         Validate document structure.
-        
+
         Returns list of validation issues.
         """
         issues = []
@@ -1104,7 +1111,7 @@ class DocumentChunk:
         }
 
 
-@dataclass 
+@dataclass
 class LLMDocument:
     """Document optimized for LLM processing."""
     content: str

@@ -18,7 +18,7 @@ class DataQuality(Enum):
     LOW = "low"           # Estimated or inferred
 
 
-@dataclass
+@dataclass(slots=True)
 class FinancialFact:
     """
     Unified fact representation optimized for both traditional analysis and AI consumption.
@@ -64,7 +64,7 @@ class FinancialFact:
 
     # Optional XBRL specifics
     context_ref: Optional[str] = None
-    dimensions: Dict[str, str] = field(default_factory=dict)
+    dimensions: Optional[Dict[str, str]] = None  # None instead of empty dict to save ~1.5 MB per company
     statement_type: Optional[str] = None
     line_item_sequence: Optional[int] = None
 
@@ -75,6 +75,11 @@ class FinancialFact:
     is_abstract: bool = False              # Abstract/header item
     is_total: bool = False                 # Total/sum item
     presentation_order: Optional[float] = None  # Order in presentation
+
+    @property
+    def is_dimensioned(self) -> bool:
+        """Whether this fact has dimensional context (segment, class, etc.)."""
+        return bool(self.dimensions)
 
     def to_llm_context(self) -> Dict[str, Any]:
         """
@@ -127,8 +132,8 @@ class FinancialFact:
         """
         Generate a display-friendly period key based on actual period dates.
 
-        This method creates period keys like "Q1 2024" based on the actual period 
-        covered by the data, not the filing year. It uses the period_end date to 
+        This method creates period keys like "Q1 2024" based on the actual period
+        covered by the data, not the filing year. It uses the period_end date to
         determine the calendar year and quarter.
 
         Returns:

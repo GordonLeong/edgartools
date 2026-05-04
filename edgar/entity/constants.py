@@ -11,7 +11,7 @@ from typing import List, Optional
 # Performance optimization: use set for O(1) lookups
 COMPANY_FORMS = {
     # Registration statements
-    "S-1", "S-3", "S-4", "S-8", "S-11",
+    "S-1", "S-3", "S-4", "S-8", "S-11", "DRS",
     # Foreign issuers registration forms
     "F-1", "F-3", "F-4", "F-6", "F-7", "F-8", "F-9", "F-10", "F-80",
     # Foreign form amendments and effectiveness
@@ -31,9 +31,16 @@ COMPANY_FORMS = {
     # Proxy materials
     "DEF 14A", "PRE 14A", "DEFA14A", "DEFM14A",
     "DEF 14C",                  # Information statement (no vote required)
+    "DEFC14A",                  # Contested proxy solicitation
+    "DEFN14A",                  # Non-management definitive proxy
+    "DFAN14A",                  # Non-management additional proxy materials
     "DEFR14A",                  # Definitive revised proxy
+    "DFRN14A",                  # Revised non-management proxy
     "PREM14A",                  # Preliminary merger proxy
-    "PREC14A",                  # Preliminary revised consent solicitation
+    "PREC14A",                  # Preliminary contested proxy
+    "PREN14A",                  # Preliminary non-management proxy
+    "PRRN14A",                  # Revised preliminary non-management proxy
+    "PX14A6G",                  # Exempt solicitation
     # Prospectus supplements
     "424B1", "424B2", "424B3", "424B4", "424B5",
     # Annual reports and notices
@@ -98,11 +105,53 @@ INDIVIDUAL_FORMS = {
     # Tender offer schedules
     "SC TO-I", "SC TO-C", "SC TO-T",
     # Investment adviser representatives
-    "ADV-E", "DRS"
+    "ADV-E"
 }
 
 # All known form types for validation
 ALL_FORM_TYPES = COMPANY_FORMS | FUND_FORMS | INDIVIDUAL_FORMS
+
+# Filer type classification form sets (used by Company.filer_type fallback)
+# Priority order: Foreign signals first, then Domestic signals
+# See docs-internal/research/sec-filings/data-structures/filer-type-gap-analysis.md
+
+FILER_TYPE_FOREIGN_FORMS = frozenset({
+    # ADR deposit registrations (100% confidence foreign)
+    'F-6', 'F-6EF', 'F-6 POS', 'F-6/A',
+    # Foreign private issuer exemption
+    '12G3-2B',
+    # Foreign registration statements
+    'F-1', 'F-1/A', 'F-3', 'F-3/A', 'F-4', 'F-4/A',
+    'F-10', 'F-10/A', 'F-3ASR', 'F-1MEF', 'F-3MEF', 'F-4MEF',
+    # Foreign Exchange Act registration
+    '20FR12B', '20FR12G', '20FR12B/A', '20FR12G/A',
+    # Foreign government annual reports
+    '18-K', '18-K/A',
+    # Sub-national foreign entity reports
+    'SE',
+})
+
+FILER_TYPE_DOMESTIC_FORMS = frozenset({
+    # Domestic registration statements
+    'S-1', 'S-1/A', 'S-3', 'S-3/A', 'S-4', 'S-4/A',
+    'S-11', 'S-11/A', 'S-3ASR', 'S-1MEF', 'S-3MEF', 'S-4MEF', 'S-4EF',
+    # Small business forms (pre-2008)
+    'SB-2', 'SB-2/A', 'SB-2MEF',
+    '10-KSB', '10-KSB/A', '10-KSB405', '10-QSB', '10-QSB/A',
+    '10-SB12G', '10-SB12G/A', '10-SB12B', '10-SB12B/A',
+    # Domestic Exchange Act registration
+    '10-12G', '10-12G/A', '10-12B', '10-12B/A',
+    # Unit Investment Trust forms
+    'S-6', 'S-6/A', 'REGDEX', 'REGDEX/A',
+    '24F-2NT', '24F-2NT/A', '487', '497J',
+    # Investment company fund forms
+    'N-1A', 'N-1A/A', 'N-2', 'N-2/A', 'N-3', 'N-4', 'N-5', 'N-6',
+    'N-8A', 'N-8F', 'N-CSR', 'N-CSRS', 'N-CEN', 'N-PORT',
+    'NSAR-A', 'NSAR-B', '485BPOS', '485APOS',
+    '40-APP', '40-APP/A', '40-17G', '40-17G/A',
+    # Regulation Crowdfunding (US-only)
+    'C', 'C/A', 'C-U', 'C-AR', 'C-TR',
+})
 
 # Name-based heuristic constants for company detection
 # Loose keywords: substring match (keyword appears anywhere in uppercased name)

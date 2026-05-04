@@ -1,7 +1,7 @@
 """
 Section extraction for SEC filings using Table of Contents analysis.
 
-This system uses TOC structure to extract specific sections like "Item 1", 
+This system uses TOC structure to extract specific sections like "Item 1",
 "Item 1A", etc. from SEC filings. This approach works consistently across
 all SEC filings regardless of whether they use semantic anchors or generated IDs.
 """
@@ -14,6 +14,7 @@ from lxml import html as lxml_html
 
 from edgar.documents.document import Document
 from edgar.documents.nodes import Node
+from edgar.documents.utils.anchor_targets import find_anchor_targets, is_anchor_match
 from edgar.documents.utils.toc_analyzer import TOCAnalyzer
 
 
@@ -35,22 +36,33 @@ class SectionBoundary:
 class SECSectionExtractor:
     """
     Extract specific sections from SEC filings using Table of Contents analysis.
-    
+
     This uses TOC structure to identify section boundaries and extract content
     between them. Works consistently for all SEC filings.
     """
 
-    def __init__(self, document: Document):
+    def __init__(self, document: Document, agent: Optional[str] = None):
         self.document = document
+        self.agent = agent
         self.section_map = {}  # Maps section names to canonical names
         self.section_boundaries = {}  # Maps section names to boundaries
         self.toc_analyzer = TOCAnalyzer()
+        self._tree = None  # Cached parsed lxml tree (set by _analyze_sections)
+        self._clean_html = None  # HTML with XML declaration stripped
         self._analyze_sections()
+
+    def _parse_html(self, html_content: str):
+        """Parse HTML once, stripping XML declaration. Cache the result."""
+        if html_content.startswith('<?xml'):
+            html_content = re.sub(r'<\?xml[^>]*\?>', '', html_content, count=1)
+        self._clean_html = html_content
+        self._tree = lxml_html.fromstring(html_content)
+        return self._tree
 
     def _analyze_sections(self) -> None:
         """
         Analyze the document using TOC structure to identify section boundaries.
-        
+
         This creates a map of section names to their anchor positions using
         Table of Contents analysis, which works for all SEC filings.
         """
@@ -59,23 +71,23 @@ class SECSectionExtractor:
         if not html_content:
             return
 
-        # Use TOC analysis to find sections
-        toc_mapping = self.toc_analyzer.analyze_toc_structure(html_content)
+        # Parse HTML once and cache the tree for reuse in section extraction
+        tree = self._parse_html(html_content)
+
+        # Use TOC analysis to find sections, passing the pre-parsed tree
+        # to avoid re-parsing the same HTML inside the analyzer
+        toc_mapping = self.toc_analyzer.analyze_toc_structure(
+            html_content, agent=self.agent, tree=tree
+        )
 
         if not toc_mapping:
             return  # No sections found
 
-        # Handle XML declaration issues  
-        if html_content.startswith('<?xml'):
-            html_content = re.sub(r'<\?xml[^>]*\?>', '', html_content, count=1)
-
-        tree = lxml_html.fromstring(html_content)
-
         sec_sections = {}
 
         for section_name, anchor_id in toc_mapping.items():
-            # Verify the anchor target exists
-            target_elements = tree.xpath(f'//*[@id="{anchor_id}"]')
+            # Verify the anchor target exists (using cached tree)
+            target_elements = find_anchor_targets(tree, anchor_id)
             if target_elements:
                 element = target_elements[0]
 
@@ -123,11 +135,11 @@ class SECSectionExtractor:
     def get_available_sections(self) -> List[str]:
         """
         Get list of available sections that can be extracted.
-        
+
         Returns:
             List of section names
         """
-        return sorted(self.section_boundaries.keys(), 
+        return sorted(self.section_boundaries.keys(),
                      key=lambda x: self.section_boundaries[x].anchor_id)
 
     def get_section_text(self, section_name: str,
@@ -229,14 +241,15 @@ class SECSectionExtractor:
         Returns:
             Extracted section text
         """
-        # Handle XML declaration issues
-        if html_content.startswith('<?xml'):
-            html_content = re.sub(r'<\?xml[^>]*\?>', '', html_content, count=1)
-
-        tree = lxml_html.fromstring(html_content)
+        # Reuse cached tree from _analyze_sections when available
+        tree = self._tree
+        if tree is None:
+            if html_content.startswith('<?xml'):
+                html_content = re.sub(r'<\?xml[^>]*\?>', '', html_content, count=1)
+            tree = lxml_html.fromstring(html_content)
 
         # Verify start anchor exists
-        start_elements = tree.xpath(f'//*[@id="{boundary.anchor_id}"]')
+        start_elements = find_anchor_targets(tree, boundary.anchor_id)
         if not start_elements:
             return ""
 
@@ -260,12 +273,12 @@ class SECSectionExtractor:
 
             if event == 'start':
                 # Check if we've reached the start anchor
-                if el_id == boundary.anchor_id:
+                if is_anchor_match(el, boundary.anchor_id):
                     in_range = True
                     continue
 
                 # Check if we've reached the end boundary
-                if boundary.end_element_id and el_id == boundary.end_element_id:
+                if boundary.end_element_id and is_anchor_match(el, boundary.end_element_id):
                     in_range = False
                     break
 
@@ -398,7 +411,7 @@ class SECSectionExtractor:
         search_start = start_pos + len(match.group())
 
         # Find next ITEM or PART header
-        next_item_pattern = rf'ITEM[\s&#;0-9xnbsp]*\d+[A-Z]?\.?\s*[A-Z]'
+        next_item_pattern = r'ITEM[\s&#;0-9xnbsp]*\d+[A-Z]?\.?\s*[A-Z]'
         next_match = re.search(next_item_pattern, html_content[search_start:], re.IGNORECASE)
 
         if next_match:
@@ -455,10 +468,10 @@ class SECSectionExtractor:
     def get_section_info(self, section_name: str) -> Optional[Dict]:
         """
         Get detailed information about a section.
-        
+
         Args:
             section_name: Section name to look up
-            
+
         Returns:
             Dict with section metadata
         """

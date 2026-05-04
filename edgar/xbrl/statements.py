@@ -63,6 +63,92 @@ def is_xbrl_structural_element(item: Dict[str, Any]) -> bool:
     return False
 
 
+def _merge_complementary_rows(data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Merge adjacent same-label rows whose period values are complementary.
+
+    When a company switches XBRL concepts across years (e.g. from a company-extension
+    to a us-gaap concept), the presentation tree contains both concepts with identical
+    labels but non-overlapping period values.  This merges those rows so users see a
+    single row with all period values filled in.
+
+    Only merges when:
+    1. Two rows share the same label (and same level/abstract status)
+    2. They appear within a short distance of each other (adjacent or nearly so)
+    3. Their period values don't conflict (one has a value where the other has None)
+    """
+    if not data or len(data) < 2:
+        return data
+
+    # Build a label→indices map for non-abstract data rows
+    from collections import defaultdict
+    label_indices = defaultdict(list)
+    for i, item in enumerate(data):
+        if item.get('is_abstract'):
+            continue
+        label = item.get('label', '')
+        if label:
+            label_indices[label].append(i)
+
+    # Identify merge pairs: same label, close together, complementary values
+    merged_into = {}  # index → target index (the row it was merged into)
+    for label, indices in label_indices.items():
+        if len(indices) < 2:
+            continue
+        # Check consecutive pairs in order
+        for k in range(len(indices) - 1):
+            a_idx, b_idx = indices[k], indices[k + 1]
+            if a_idx in merged_into or b_idx in merged_into:
+                continue
+            # Must be close together (allow 1 abstract row between them)
+            if b_idx - a_idx > 2:
+                continue
+            a_item, b_item = data[a_idx], data[b_idx]
+            # Must be same level and same dimension status
+            if a_item.get('level') != b_item.get('level'):
+                continue
+            if a_item.get('is_dimension') != b_item.get('is_dimension'):
+                continue
+            # Check value complementarity
+            a_vals = a_item.get('values', {})
+            b_vals = b_item.get('values', {})
+            all_keys = set(a_vals.keys()) | set(b_vals.keys())
+            if not all_keys:
+                continue
+            conflict = False
+            has_complement = False
+            for key in all_keys:
+                av = a_vals.get(key)
+                bv = b_vals.get(key)
+                if av is not None and bv is not None:
+                    conflict = True
+                    break
+                if (av is None) != (bv is None):
+                    has_complement = True
+            if conflict or not has_complement:
+                continue
+            # Merge b into a
+            for key in all_keys:
+                if a_vals.get(key) is None and b_vals.get(key) is not None:
+                    a_vals[key] = b_vals[key]
+            # Copy over any units/period_types from b that a is missing
+            for meta_key in ('units', 'period_types'):
+                a_meta = a_item.get(meta_key, {})
+                b_meta = b_item.get(meta_key, {})
+                if b_meta:
+                    if not a_meta:
+                        a_item[meta_key] = dict(b_meta)
+                    else:
+                        for key in b_meta:
+                            if key not in a_meta or a_meta[key] is None:
+                                a_meta[key] = b_meta[key]
+            merged_into[b_idx] = a_idx
+
+    if not merged_into:
+        return data
+
+    return [item for i, item in enumerate(data) if i not in merged_into]
+
+
 _FINANCIAL_WORDS = [
     # 14-letter words
     'POSTRETIREMENT',
@@ -290,6 +376,18 @@ class Statement:
         # Store both for backward compatibility during transition
         self._include_dimensions = include_dimensions
         self._view = normalize_view(view) if view is not None else None
+        self._report = None  # Set by notes.py when built from FilingSummary
+
+    @property
+    def report(self):
+        """The FilingSummary Report backing this statement, if available.
+
+        Provides access to the rendered HTML version of the table:
+            >>> note.tables[0].report.to_dataframe()  # HTML-extracted DataFrame
+            >>> note.tables[0].report.view()           # Rich display
+            >>> note.tables[0].report.content           # Raw HTML
+        """
+        return self._report
 
     def is_segmented(self) -> bool:
         """
@@ -414,7 +512,7 @@ class Statement:
         # Collect equity component member labels from DataFrame
         # DataFrame has more complete dimension info than raw_data's dimension_metadata
         try:
-            df = self.to_dataframe()
+            df = self.to_dataframe(presentation=False)
             equity_axis_rows = df[
                 df['dimension_axis'].fillna('').str.contains('StatementEquityComponentsAxis', case=False)
             ]
@@ -652,6 +750,131 @@ class Statement:
         rendered_statement = self.render()
         return str(rendered_statement)  # Delegates to RenderedStatement.__str__()
 
+    def to_markdown(self, detail: str = 'standard', optimize_for_llm: bool = True) -> str:
+        """Render this statement as GitHub-Flavored Markdown.
+
+        Args:
+            detail: 'minimal' (table only), 'standard' (with header), 'full' (header + footer)
+            optimize_for_llm: Simplify output for LLM consumption
+        """
+        return self.render().to_markdown(detail=detail, optimize_for_llm=optimize_for_llm)
+
+    def to_context(self, detail: str = 'standard') -> str:
+        """
+        AI-optimized context string.
+
+        Args:
+            detail: 'minimal' (~100 tokens), 'standard' (~300 tokens), 'full' (~500+ tokens)
+        """
+        lines = []
+
+        # Render once and reuse
+        stmt_type = self.canonical_type or self.role_or_type
+        try:
+            rendered = self.render()
+        except Exception:
+            rendered = None
+
+        # === IDENTITY ===
+        title = rendered.title if rendered else stmt_type
+        lines.append(f"STATEMENT: {title}")
+        lines.append("")
+
+        # Entity info from parent XBRL
+        try:
+            entity = self.xbrl.entity_info
+            if entity:
+                name = entity.get('entity_name', '')
+                ticker = entity.get('ticker', '')
+                if name:
+                    entity_str = name
+                    if ticker:
+                        entity_str += f" ({ticker})"
+                    lines.append(f"Entity: {entity_str}")
+        except Exception:
+            pass
+
+        # Period info
+        if rendered and rendered.header:
+            period_labels = [h for h in rendered.header.columns if h]
+            if period_labels:
+                lines.append(f"Periods: {', '.join(period_labels)}")
+
+        # Line item count
+        if rendered and rendered.rows:
+            lines.append(f"Line Items: {len(rendered.rows)}")
+
+        if detail == 'minimal':
+            return "\n".join(lines)
+
+        # === STANDARD ===
+        # Units note (strip any Rich markup tags)
+        try:
+            if rendered and rendered.units_note:
+                import re
+                units_clean = re.sub(r'\[/?[^\]]+\]', '', rendered.units_note)
+                lines.append(f"Scale: {units_clean}")
+        except Exception:
+            pass
+
+        # Key line items (first few non-abstract rows with values)
+        if rendered and rendered.rows:
+            lines.append("")
+            lines.append("KEY LINE ITEMS:")
+            count = 0
+            for row in rendered.rows:
+                if count >= 8:
+                    break
+                if row.is_abstract:
+                    continue
+                # Get first cell value
+                cell_vals = [c for c in (row.cells or []) if c and c.value is not None]
+                if not cell_vals:
+                    continue
+                label = row.label or ''
+                # Format the value using the cell's own formatter
+                val_str = cell_vals[0].get_formatted_value()
+                if label:
+                    lines.append(f"  {label}: {val_str}")
+                    count += 1
+            # Count remaining data rows
+            remaining_data = sum(1 for r in rendered.rows
+                                 if not r.is_abstract
+                                 and any(c and c.value is not None for c in (r.cells or [])))
+            remaining = remaining_data - count
+            if remaining > 0:
+                lines.append(f"  ... ({remaining} more)")
+
+        # Available actions
+        lines.append("")
+        lines.append("AVAILABLE ACTIONS:")
+        lines.append("  .render()                Rendered table for display")
+        lines.append("  .to_dataframe()          Full data as DataFrame")
+        lines.append("  .validate()              Validate accounting identity")
+        lines.append("  .calculate_ratios()      Financial ratios")
+        lines.append("  .text()                  Narrative content (if note)")
+        lines.append("  .analyze_trends()        Multi-period trend analysis")
+
+        if detail == 'standard':
+            return "\n".join(lines)
+
+        # === FULL ===
+        # Statement metadata
+        if self.canonical_type:
+            lines.append("")
+            lines.append(f"Statement Type: {self.canonical_type}")
+        if self.is_segmented():
+            lines.append("Segmented: Yes")
+
+        # Note/textblock indicator
+        try:
+            if self.is_note:
+                lines.append("Contains Narrative: Yes")
+        except Exception:
+            pass
+
+        return "\n".join(lines)
+
     @property
     def docs(self):
         """
@@ -685,7 +908,7 @@ class Statement:
                      include_unit: bool = False,
                      include_point_in_time: bool = False,
                      include_standardization: bool = False,
-                     presentation: bool = False,
+                     presentation: bool = True,
                      matrix: bool = False) -> Any:
         """Convert statement to pandas DataFrame.
 
@@ -707,10 +930,10 @@ class Statement:
                                     This is useful for cross-company analysis and filtering.
                                     Note: The 'standard_concept' column is always available in
                                     the DataFrame when standard=True; this parameter is deprecated.
-            presentation: If True, apply HTML-matching presentation logic (Issue #463)
-                         Cash Flow: outflows (balance='credit') shown as negative
-                         Income: apply preferred_sign transformations
-                         Default: False (raw instance values)
+            presentation: If True (default), apply preferred_sign from the XBRL
+                         presentation linkbase so values match SEC HTML display
+                         (e.g., cash outflows shown as negative). If False, return
+                         raw XBRL instance values.
             matrix: If True, return matrix format for Statement of Equity (equity components
                    as columns, activities as rows). Ignored for non-equity statements.
                    Default: False (standard flat format for backwards compatibility).
@@ -818,6 +1041,7 @@ class Statement:
         from edgar.xbrl.core import get_unit_display_name
         from edgar.xbrl.core import is_point_in_time as get_is_point_in_time
         from edgar.xbrl.periods import determine_periods_to_display
+        from edgar.xbrl.rendering import _is_html, html_to_text
 
         # Get raw statement data with view-based filtering
         raw_data = self.get_raw_data(period_filter=period_filter, view=view)
@@ -849,6 +1073,48 @@ class Statement:
 
         if not periods_to_display:
             return pd.DataFrame()
+
+        # Pre-compute column names from period keys
+        _period_column_names = {}
+        for period_key, period_label in periods_to_display:
+            parts = period_key.split('_')
+            if period_key.startswith('duration_') and len(parts) >= 3:
+                end_date = parts[2]
+            elif period_key.startswith('instant_') and len(parts) >= 2:
+                end_date = parts[1]
+            else:
+                _period_column_names[period_key] = period_label
+                continue
+            _period_column_names[period_key] = end_date  # tentative
+
+        # Add (Qn) / (YTD) / (FY) suffixes for duration periods
+        for period_key, period_label in periods_to_display:
+            parts = period_key.split('_')
+            if period_key.startswith('duration_') and len(parts) >= 3:
+                start_date, end_date = parts[1], parts[2]
+                try:
+                    d0 = datetime.strptime(start_date, '%Y-%m-%d')
+                    d1 = datetime.strptime(end_date, '%Y-%m-%d')
+                    days = (d1 - d0).days
+                    if 80 <= days <= 100:
+                        fy_end_month = None
+                        if hasattr(self, 'xbrl') and self.xbrl and hasattr(self.xbrl, 'entity_info') and self.xbrl.entity_info:
+                            fy_end_month = self.xbrl.entity_info.get('fiscal_year_end_month')
+                        if fy_end_month:
+                            month_offset = (d1.month - fy_end_month - 1) % 12
+                            q = f"Q{(month_offset // 3) + 1}"
+                        else:
+                            month = d1.month
+                            q = "Q1" if month <= 3 or month == 12 else \
+                                "Q2" if month <= 6 else \
+                                "Q3" if month <= 9 else "Q4"
+                        _period_column_names[period_key] = f"{end_date} ({q})"
+                    elif 175 <= days <= 285:
+                        _period_column_names[period_key] = f"{end_date} (YTD)"
+                    elif days > 350:
+                        _period_column_names[period_key] = f"{end_date} (FY)"
+                except (ValueError, TypeError):
+                    pass
 
         # Build DataFrame rows
         df_rows = []
@@ -940,25 +1206,17 @@ class Statement:
             # Add period values (raw from instance document)
             values_dict = item.get('values', {})
             for period_key, period_label in periods_to_display:
-                # Use end date as column name (more concise than full label)
-                # Extract date from period_key (e.g., "duration_2016-09-25_2017-09-30" → "2017-09-30")
+                column_name = _period_column_names.get(period_key, period_label)
+                # Extract start/end dates for equity statement logic
                 start_date = None
                 end_date = None
                 if '_' in period_key:
                     parts = period_key.split('_')
                     if len(parts) >= 3:
-                        # Duration period: duration_START_END
                         start_date = parts[1]
                         end_date = parts[2]
-                        column_name = end_date
                     elif len(parts) == 2:
-                        # Instant period: instant_DATE
                         end_date = parts[1]
-                        column_name = end_date
-                    else:
-                        column_name = period_label
-                else:
-                    column_name = period_label
 
                 # Use raw value from instance document
                 value = values_dict.get(period_key)
@@ -995,6 +1253,12 @@ class Statement:
                 if value is None and period_key.startswith('duration_') and end_date:
                     instant_key = f"instant_{end_date}"
                     value = values_dict.get(instant_key)
+
+                # Issue #762: Sanitize HTML strings from TextBlock XBRL concepts
+                # Disclosure tables contain facts whose values are full HTML markup.
+                # Strip to plain text so DataFrame cells are usable.
+                if isinstance(value, str) and _is_html(value):
+                    value = html_to_text(value)
 
                 # Issue #582: Don't overwrite a valid value with None
                 # Multiple periods can map to the same column (e.g., transition periods for
@@ -1254,8 +1518,9 @@ class Statement:
         # Get statement type
         statement_type = self.canonical_type if self.canonical_type else self.role_or_type
 
-        # For Income Statement and Cash Flow Statement: Use preferred_sign
-        if statement_type in ('IncomeStatement', 'CashFlowStatement'):
+        # For Income Statement, Cash Flow Statement, and Balance Sheet: Use preferred_sign
+        # Balance Sheet included for contra accounts like Treasury Stock (preferred_sign=-1)
+        if statement_type in ('IncomeStatement', 'CashFlowStatement', 'BalanceSheet'):
             if 'preferred_sign' in result.columns:
                 for col in period_cols:
                     if col not in result.columns:
@@ -1270,8 +1535,6 @@ class Statement:
                         # Apply preferred_sign where it's not None and not 0
                         mask = result['preferred_sign'].notna() & (result['preferred_sign'] != 0)
                         result.loc[mask, col] = numeric_col[mask] * result.loc[mask, 'preferred_sign']
-
-        # Balance Sheet: no transformation
 
         return result
 
@@ -1559,8 +1822,8 @@ class Statement:
 
         return trends
 
-    def _analyze_balance_sheet_trends(self, data: List[Dict[str, Any]], 
-                                     trends: Dict[str, List[float]], 
+    def _analyze_balance_sheet_trends(self, data: List[Dict[str, Any]],
+                                     trends: Dict[str, List[float]],
                                      period: str) -> None:
         """Analyze balance sheet trends."""
         metrics = {
@@ -1576,8 +1839,8 @@ class Statement:
                     trends[metric_name] = []
                 trends[metric_name].append(value)
 
-    def _analyze_income_statement_trends(self, data: List[Dict[str, Any]], 
-                                        trends: Dict[str, List[float]], 
+    def _analyze_income_statement_trends(self, data: List[Dict[str, Any]],
+                                        trends: Dict[str, List[float]],
                                         period: str) -> None:
         """Analyze income statement trends."""
         metrics = {
@@ -1614,6 +1877,10 @@ class Statement:
         data = self.xbrl.get_statement(statement_id, period_filter=period_filter, view=view)
         if data is None:
             raise StatementValidationError(f"Failed to retrieve data for statement {statement_id}")
+        # Merge adjacent same-label rows with complementary NaN values (Issue #3n9t).
+        # This handles concept renames across periods where a company switches between
+        # us-gaap and company-extension concepts for the same line item.
+        data = _merge_complementary_rows(data)
         return data
 
     def text(self, raw_html: bool = False) -> Optional[str]:
@@ -1644,6 +1911,11 @@ class Statement:
         return "\n\n".join(text_parts) if text_parts else None
 
     @property
+    def html(self) -> Optional[str]:
+        """Get raw HTML content from a note/disclosure statement."""
+        return self.text(raw_html=True)
+
+    @property
     def is_note(self) -> bool:
         """Check if this statement contains narrative TextBlock content."""
         from edgar.xbrl.abstract_detection import is_textblock_concept
@@ -1656,12 +1928,175 @@ class Statement:
             for item in data
         )
 
+    def __getitem__(self, label: str) -> Optional['StatementLineItem']:
+        """Look up a line item by exact label (case-insensitive).
+
+        For fuzzy/partial matching, use .search() instead.
+
+        Args:
+            label: Exact line item label (case-insensitive)
+
+        Returns:
+            StatementLineItem with .note/.notes drill-down, or None
+
+        Example:
+            >>> stmt['Cash and cash equivalents']     # exact match
+            >>> stmt['cash and cash equivalents']     # case-insensitive
+            >>> stmt.search('cash')                   # fuzzy search
+        """
+        rendered = self.render()
+        if not rendered or not rendered.rows:
+            return None
+
+        label_lower = label.lower()
+        columns = rendered.header.columns if rendered.header else []
+        for row in rendered.rows:
+            if row.label.lower() == label_lower:
+                return StatementLineItem(row, self.xbrl, columns=columns)
+
+        return None
+
+    def search(self, keyword: str) -> List['StatementLineItem']:
+        """Search line items by keyword. Returns all matches, best first.
+
+        Ranking: exact label > label starts with keyword > word match > substring.
+
+        Args:
+            keyword: Search term (case-insensitive)
+
+        Returns:
+            List of matching StatementLineItems, best match first.
+
+        Example:
+            >>> stmt.search('debt')       # → [Long-term debt, Short-term debt, ...]
+            >>> stmt.search('total')      # → [Total assets, Total liabilities, ...]
+        """
+        if not keyword or not keyword.strip():
+            return []
+
+        rendered = self.render()
+        if not rendered or not rendered.rows:
+            return []
+
+        key = keyword.strip().lower()
+        scored = []
+        for row in rendered.rows:
+            if row.is_abstract:
+                continue
+            label = row.label.lower()
+            words = [w.rstrip("',;:-()") for w in label.split()]
+
+            if label == key:
+                scored.append((0, row))
+            elif label.startswith(key):
+                scored.append((1, row))
+            elif any(w == key for w in words):
+                scored.append((2, row))
+            elif any(w.startswith(key) for w in words):
+                scored.append((3, row))
+            elif key in label:
+                scored.append((4, row))
+
+        scored.sort(key=lambda x: x[0])
+        columns = rendered.header.columns if rendered.header else []
+        return [StatementLineItem(row, self.xbrl, columns=columns) for _, row in scored]
+
+
+class StatementLineItem:
+    """A single line item from a financial statement, with drill-down to notes.
+
+    Created by Statement.__getitem__ — not intended for direct construction.
+
+    Example:
+        >>> item = balance_sheet['Long-term Debt']
+        >>> item.label        # 'Long-term debt, non-current'
+        >>> item.concept      # 'us-gaap_LongTermDebtNoncurrent'
+        >>> item.note         # → Note object (most specific match)
+        >>> item.notes        # → [Note, ...] (all related notes)
+        >>> item.values       # {'instant_2024-12-31': 98071000000, ...}
+    """
+    __slots__ = ('_row', '_xbrl', '_columns')
+
+    def __init__(self, row, xbrl, columns=None):
+        self._row = row
+        self._xbrl = xbrl
+        self._columns = columns or []
+
+    @property
+    def label(self) -> str:
+        return self._row.label
+
+    @property
+    def concept(self) -> str:
+        return self._row.metadata.get('concept', '')
+
+    @property
+    def values(self) -> list:
+        """Cell values in period order (matches header column order)."""
+        return [cell.value for cell in (self._row.cells or [])]
+
+    @property
+    def note(self) -> Optional[Any]:
+        """The most relevant Note for this line item, or None."""
+        notes = self.notes
+        return notes[0] if notes else None
+
+    @property
+    def notes(self) -> List[Any]:
+        """All Notes related to this line item, ranked by specificity."""
+        xbrl = self._xbrl
+        if not xbrl or not self.concept:
+            return []
+        from edgar.xbrl.notes import get_notes_for_concept
+        return get_notes_for_concept(self.concept, xbrl)
+
+    def to_markdown(self, include_note: bool = True) -> str:
+        """Render this line item as markdown with formatted values and optional note link.
+
+        Args:
+            include_note: Include a blockquote linking to the related Note
+        """
+        parts = []
+
+        # Format values with period labels from the rendered statement header
+        cells = self._row.cells or []
+        columns = self._columns or []
+        formatted_pairs = []
+        for i, cell in enumerate(cells):
+            if cell.value is not None and cell.value != "":
+                formatted_val = str(cell.formatter(cell.value))
+                if formatted_val:
+                    if i < len(columns) and columns[i]:
+                        formatted_pairs.append(f"{formatted_val} ({columns[i]})")
+                    else:
+                        formatted_pairs.append(formatted_val)
+
+        if formatted_pairs:
+            parts.append(f"**{self.label}**: {', '.join(formatted_pairs)}")
+        else:
+            parts.append(f"**{self.label}**")
+
+        # Note reference
+        if include_note:
+            note = self.note
+            if note:
+                parts.append(f"> Related: Note {note.number} \u2014 {note.title}")
+
+        return '\n\n'.join(parts)
+
+    def __repr__(self):
+        concept_str = f", concept='{self.concept}'" if self.concept else ""
+        return f"StatementLineItem('{self.label}'{concept_str})"
+
+    def __str__(self):
+        return self.label
+
 
 class Statements:
     """
     High-level interface for working with XBRL financial statements.
 
-    This class provides a user-friendly way to access and manipulate 
+    This class provides a user-friendly way to access and manipulate
     financial statements extracted from XBRL data.
     """
 
@@ -2718,16 +3153,21 @@ class StitchedStatement:
             show_date_range=show_date_range
         )
 
-    def to_dataframe(self) -> pd.DataFrame:
+    def to_dataframe(self, presentation: bool = True) -> pd.DataFrame:
         """
         Convert the stitched statement to a pandas DataFrame.
+
+        Args:
+            presentation: If True (default), apply preferred_sign so values match
+                         SEC HTML display (e.g., cash outflows shown as negative).
+                         If False, return raw XBRL instance values.
 
         Returns:
             pandas DataFrame with periods as columns and concepts as rows
         """
         from edgar.xbrl.stitching import to_pandas
 
-        return to_pandas(self.statement_data)
+        return to_pandas(self.statement_data, presentation=presentation)
 
     def __rich__(self):
         """

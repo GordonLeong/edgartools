@@ -12,24 +12,28 @@ Design principles:
 5. Helpful error messages with suggestions
 
 Tools:
-- edgar_company: Get company info, financials, filings, ownership in one call
-- edgar_search: Search companies and/or filings
-- edgar_filing: Read SEC filing content and sections (10-K, 10-Q, 8-K, DEF 14A, 13D/G, 13F)
+- edgar_company: Starting point for company questions (profile, financials, filings, ownership)
+- edgar_filing: Examine any filing by accession number or URL (structured context)
+- edgar_read: Read specific sections from filings (risk factors, MD&A, business, etc.)
+- edgar_search: Find companies by name or list filings by form type
+- edgar_text_search: Full-text search across SEC filing content (EFTS)
 - edgar_compare: Compare multiple companies or analyze industry
 - edgar_ownership: Insider transactions, fund portfolios
 - edgar_monitor: Real-time SEC filings feed
 - edgar_trends: Financial time series with growth rates
 - edgar_screen: Company discovery by industry, exchange, state
-- edgar_text_search: Full-text search across SEC filing content
+- edgar_fund: Fund, ETF, BDC, money market data
+- edgar_proxy: Executive compensation and governance (DEF 14A)
 
 Usage:
-    python -m edgar.ai.mcp        # Via module
+    python -m edgar.ai            # Via module
     edgartools-mcp                # Via console script
 """
 
 import asyncio
 import logging
 import os
+import sys
 from typing import Any
 
 from mcp import Resource, Tool
@@ -85,16 +89,51 @@ def _import_tools():
     from edgar.ai.mcp.tools import company  # noqa: F401
     from edgar.ai.mcp.tools import search  # noqa: F401
     from edgar.ai.mcp.tools import filing  # noqa: F401
+    from edgar.ai.mcp.tools import reader  # noqa: F401
     from edgar.ai.mcp.tools import compare  # noqa: F401
     from edgar.ai.mcp.tools import ownership  # noqa: F401
     from edgar.ai.mcp.tools import monitor  # noqa: F401
     from edgar.ai.mcp.tools import trends  # noqa: F401
     from edgar.ai.mcp.tools import screen  # noqa: F401
     from edgar.ai.mcp.tools import text_search  # noqa: F401
+    from edgar.ai.mcp.tools import fund  # noqa: F401
+    from edgar.ai.mcp.tools import proxy  # noqa: F401
+    from edgar.ai.mcp.tools import notes  # noqa: F401
 
+
+# Server instructions — sent to the LLM on first connection, before any tool call.
+# This is the system prompt for the tool suite.
+SERVER_INSTRUCTIONS = """EdgarTools provides access to all SEC EDGAR filing data. 13 tools organized by intent:
+
+DISCOVER companies and filings:
+- edgar_company: Start here for any company question (profile, financials, filings)
+- edgar_search: Find companies by name or list filings by form type
+- edgar_screen: Filter companies by industry, exchange, or state
+- edgar_text_search: Full-text search across filing content (EFTS)
+- edgar_monitor: See what was just filed with the SEC
+
+EXAMINE specific filings:
+- edgar_filing: Get structured context for a filing (by company+form or accession number/URL)
+- edgar_read: Extract specific sections (risk factors, MD&A, business description, items)
+- edgar_notes: Drill into notes and disclosures — the detail behind financial statement numbers
+
+ANALYZE financial data:
+- edgar_trends: Revenue, income, EPS time series with growth rates
+- edgar_compare: Side-by-side company comparison on financial metrics
+- edgar_ownership: Insider transactions (Form 4) or institutional portfolios (13F)
+- edgar_fund: Mutual fund, ETF, BDC, and money market fund data
+- edgar_proxy: Executive compensation and governance (DEF 14A)
+
+Common workflows:
+1. Company research: edgar_company → edgar_read (10-K sections) → edgar_trends
+2. Filing analysis: edgar_filing (by accession/URL) → edgar_read (extract sections)
+3. Event monitoring: edgar_monitor → edgar_filing (examine new filings)
+4. Peer comparison: edgar_screen (find peers) → edgar_compare (compare metrics)
+
+Pre-built analysis prompts are available via prompts/list: due_diligence, earnings_analysis, industry_overview, insider_monitor, fund_analysis, filing_comparison, activist_tracking."""
 
 # Create the server
-app = Server("edgartools")
+app = Server("edgartools", instructions=SERVER_INSTRUCTIONS)
 
 
 @app.list_tools()
@@ -112,8 +151,6 @@ async def list_tools() -> list[Tool]:
             "description": info["description"],
             "inputSchema": info["schema"],
         }
-        if "output_schema" in info:
-            kwargs["outputSchema"] = info["output_schema"]
         tools.append(Tool(**kwargs))
     return tools
 
@@ -140,10 +177,17 @@ async def call_tool(name: str, arguments: dict[str, Any] | None) -> list[TextCon
         )]
 
     except Exception as e:
+        from edgar.ai.mcp.tools.base import classify_error, error as error_response
         logger.error("Error in tool %s: %s", name, e, exc_info=True)
+        classified = classify_error(e)
+        resp = error_response(
+            classified["message"],
+            suggestions=classified["suggestions"],
+            error_code=classified["error_code"]
+        )
         return [TextContent(
             type="text",
-            text=f'{{"success": false, "error": "{str(e)}"}}'
+            text=resp.to_json()
         )]
 
 
@@ -215,7 +259,15 @@ Search for companies or filings.
 ```
 
 ### edgar_filing
-Read SEC filing content.
+Examine any SEC filing by accession number or URL.
+
+```json
+{"input": "0000320193-23-000077"}
+{"input": "https://www.sec.gov/Archives/edgar/data/320193/000032019323000077/...", "detail": "full"}
+```
+
+### edgar_read
+Read specific sections from a filing.
 
 ```json
 {"identifier": "AAPL", "form": "10-K", "sections": ["business", "risk_factors"]}
@@ -274,6 +326,26 @@ Full-text search across SEC filing content.
 {"query": "tariff impact", "identifier": "AAPL", "start_date": "2024-01-01"}
 ```
 
+### edgar_fund
+Get fund, ETF, BDC, and money market fund data.
+
+```json
+{"action": "lookup", "identifier": "VFINX"}
+{"action": "search", "query": "Vanguard 500"}
+{"action": "portfolio", "identifier": "SPY"}
+{"action": "money_market", "identifier": "VMFXX"}
+{"action": "bdc_search", "query": "Ares"}
+{"action": "bdc_portfolio", "identifier": "ARCC"}
+```
+
+### edgar_proxy
+Get executive compensation and governance data from DEF 14A proxy statements.
+
+```json
+{"identifier": "AAPL"}
+{"identifier": "MSFT", "filing_index": 1}
+```
+
 ## Prompts
 
 Pre-built analysis workflows:
@@ -281,6 +353,9 @@ Pre-built analysis workflows:
 - **earnings_analysis**: Earnings deep dive (8-K, trends, peer comparison)
 - **industry_overview**: Sector survey (screen, compare, trends)
 - **insider_monitor**: Insider trading activity analysis
+- **fund_analysis**: Mutual fund/ETF deep dive (hierarchy, holdings, performance)
+- **filing_comparison**: Compare filings across periods or companies
+- **activist_tracking**: SC 13D/G activist investor monitoring
 
 ## Tips
 
@@ -313,41 +388,122 @@ def _get_tools_doc() -> str:
     return "".join(doc_parts)
 
 
-def main():
+def _parse_args(argv: list[str] | None = None):
+    """Parse command-line arguments."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="EdgarTools MCP Server")
+    parser.add_argument(
+        "--transport",
+        choices=["stdio", "streamable-http"],
+        default="stdio",
+        help="Transport type (default: stdio)",
+    )
+    parser.add_argument(
+        "--host",
+        default="0.0.0.0",
+        help="Host to bind HTTP server (default: 0.0.0.0)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="Port for HTTP server (default: 8000)",
+    )
+    parser.add_argument(
+        "--test", "-t",
+        action="store_true",
+        help="Test server configuration and exit",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None):
     """Main entry point for MCP server."""
+    args = _parse_args(argv)
+
+    if args.test:
+        sys.exit(0 if test_server() else 1)
+
     try:
-        # Get package version for server version
         from edgar.__about__ import __version__
 
         # Configure EDGAR identity from environment
         setup_edgar_identity()
 
-        async def run_server():
-            """Run the async MCP server."""
-            logger.info(f"Starting EdgarTools MCP Server v{__version__}")
-
-            # Use stdio transport
-            async with stdio_server() as (read_stream, write_stream):
-                await app.run(
-                    read_stream,
-                    write_stream,
-                    InitializationOptions(
-                        server_name="edgartools",
-                        server_version=__version__,
-                        capabilities=app.get_capabilities(
-                            notification_options=NotificationOptions(),
-                            experimental_capabilities={}
-                        )
-                    )
-                )
-
-        asyncio.run(run_server())
+        if args.transport == "streamable-http":
+            _run_http(args.host, args.port, __version__)
+        else:
+            _run_stdio(__version__)
 
     except KeyboardInterrupt:
         logger.info("Server stopped by user")
     except Exception as e:
         logger.error(f"Server error: {e}", exc_info=True)
         raise
+
+
+def _run_stdio(version: str):
+    """Run the server with stdio transport."""
+
+    async def run_server():
+        logger.info(f"Starting EdgarTools MCP Server v{version} (stdio)")
+        async with stdio_server() as (read_stream, write_stream):
+            await app.run(
+                read_stream,
+                write_stream,
+                InitializationOptions(
+                    server_name="edgartools",
+                    server_version=version,
+                    capabilities=app.get_capabilities(
+                        notification_options=NotificationOptions(),
+                        experimental_capabilities={},
+                    ),
+                ),
+            )
+
+    asyncio.run(run_server())
+
+
+def _run_http(host: str, port: int, version: str):
+    """Run the server with Streamable HTTP transport."""
+    import contextlib
+
+    import uvicorn
+    from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+
+    # Set version on the Server so StreamableHTTPSessionManager picks it up
+    # when it builds InitializationOptions internally (no app.run() call in HTTP mode)
+    app.version = version
+
+    session_manager = StreamableHTTPSessionManager(
+        app=app,
+        json_response=True,
+        stateless=True,
+    )
+
+    # Wrap handle_request in an ASGI class so Starlette's Route treats it
+    # as an ASGI app (not a request-response function)
+    class _MCPEndpoint:
+        async def __call__(self, scope, receive, send):
+            await session_manager.handle_request(scope, receive, send)
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_app):
+        async with session_manager.run():
+            logger.info(
+                f"EdgarTools MCP Server v{version} running on http://{host}:{port}/mcp"
+            )
+            yield
+
+    starlette_app = Starlette(
+        routes=[Route("/mcp", endpoint=_MCPEndpoint())],
+        lifespan=lifespan,
+    )
+
+    uvicorn.run(starlette_app, host=host, port=port)
 
 
 def test_server():
@@ -414,10 +570,4 @@ def test_server():
 
 
 if __name__ == "__main__":
-    import sys
-
-    # Check for --test flag
-    if "--test" in sys.argv or "-t" in sys.argv:
-        sys.exit(0 if test_server() else 1)
-    else:
-        main()
+    main()

@@ -125,6 +125,10 @@ _STRONG_KEYWORDS = {
     StatementType.CASH_FLOW: [
         'cash flows from operating', 'cash flows from investing',
         'cash flows from financing',
+        'net cash provided by operating', 'net cash used in operating',
+        'net cash provided by investing', 'net cash used in investing',
+        'net cash provided by financing', 'net cash used in financing',
+        'net cash provided by (used in)',
     ],
 }
 
@@ -141,6 +145,9 @@ _STATEMENT_KEYWORDS = {
         'noninterest expense', 'loss from operations', 'loss before',
         'pretax income', 'pre-tax income', 'income before provision',
         'provision for credit', 'provision for income',
+        'net earnings', 'diluted eps', 'basic eps',
+        'eps (diluted)', 'eps (basic)', 'reported sales',
+        'cost of products sold', 'sales to customers',
     ],
     StatementType.BALANCE_SHEET: [
         'total assets', 'total liabilities', 'stockholders', 'current assets',
@@ -152,7 +159,8 @@ _STATEMENT_KEYWORDS = {
         'cash flows', 'operating activities', 'investing activities',
         'financing activities', 'cash and cash equivalents, beginning',
         'cash and cash equivalents, end', 'depreciation and amortization',
-        'capital expenditures',
+        'capital expenditures', 'net cash provided by', 'net cash used in',
+        'cash at beginning', 'cash at end of period',
     ],
     StatementType.SEGMENT_DATA: [
         'client computing', 'data center', 'foundry', 'segment revenue',
@@ -208,13 +216,33 @@ _ROW_TYPE_PATTERNS = {
 }
 
 
-def _classify_row_type(label: str) -> RowType:
-    """Classify a row's type based on its label text."""
+def _classify_row_type(label: str, parent_context: str = '') -> RowType:
+    """Classify a row's type based on its label text and optional parent context.
+
+    When HTML tables have hierarchical labels like:
+        Earnings per share:
+          Basic          $2.85
+          Diluted        $2.84
+    the parent "Earnings per share:" is passed as parent_context for "Basic"/"Diluted".
+    """
     label_lower = label.lower()
+    # Check the label itself first
     for row_type, patterns in _ROW_TYPE_PATTERNS.items():
         for pattern in patterns:
             if pattern in label_lower:
                 return row_type
+    # If no match but we have parent context, classify using parent
+    # Check SHARES before PER_SHARE to handle parents like
+    # "Shares used in computing earnings per share:" (contains both patterns)
+    if parent_context:
+        parent_lower = parent_context.lower()
+        # Priority order: SHARES, then PER_SHARE, then others
+        priority_order = [RowType.SHARES, RowType.PER_SHARE, RowType.PERCENTAGE]
+        for row_type in priority_order:
+            patterns = _ROW_TYPE_PATTERNS.get(row_type, [])
+            for pattern in patterns:
+                if pattern in parent_lower:
+                    return row_type
     return RowType.AMOUNT
 
 
@@ -440,21 +468,32 @@ class FinancialTable:
     raw_index: int = 0
     """Original index in document (for debugging)."""
 
-    row_types: dict = field(default_factory=dict)
-    """Mapping of row label → RowType for each row."""
+    row_types: Union[dict, list] = field(default_factory=list)
+    """List of RowType by position, or legacy dict of label → RowType."""
 
     def __bool__(self) -> bool:
         """FinancialTable is truthy if it has data."""
         return not self.dataframe.empty
 
-    def get_row_type(self, label: str) -> RowType:
-        """Get the RowType for a given row label."""
-        return self.row_types.get(label, RowType.AMOUNT)
+    def get_row_type(self, label: str, position: int = -1) -> RowType:
+        """Get the RowType for a given row label or position.
+
+        When position >= 0 and row_types is a list, uses positional lookup
+        to correctly handle duplicate labels (e.g., two 'Basic' rows —
+        one PER_SHARE, one SHARES).
+        """
+        if isinstance(self.row_types, list):
+            if 0 <= position < len(self.row_types):
+                return self.row_types[position]
+        if isinstance(self.row_types, dict):
+            return self.row_types.get(label, RowType.AMOUNT)
+        return RowType.AMOUNT
 
     @property
     def per_share_rows(self) -> pd.DataFrame:
         """Return only per-share rows (EPS, dividends per share, etc.)."""
-        mask = [self.get_row_type(str(idx)) == RowType.PER_SHARE for idx in self.dataframe.index]
+        mask = [self.get_row_type(str(idx), pos) == RowType.PER_SHARE
+                for pos, idx in enumerate(self.dataframe.index)]
         return self.dataframe.loc[mask]
 
     @property
@@ -470,8 +509,9 @@ class FinancialTable:
 
         df = self.dataframe.copy()
         # Only scale AMOUNT rows — skip PER_SHARE, SHARES, PERCENTAGE
-        skip_labels = {str(idx) for idx in df.index
-                       if self.get_row_type(str(idx)) != RowType.AMOUNT}
+        skip_positions = {pos for pos, idx in enumerate(df.index)
+                          if self.get_row_type(str(idx), pos) != RowType.AMOUNT}
+        skip_labels = {str(df.index[pos]) for pos in skip_positions}
 
         for col_idx in range(len(df.columns)):
             col_series = df.iloc[:, col_idx]
@@ -676,11 +716,11 @@ class FinancialTable:
         for col in df.columns:
             period_info = _parse_period_header(str(col))
 
-            for idx_label in df.index:
+            for pos, idx_label in enumerate(df.index):
                 label = str(idx_label)
-                row_type = self.get_row_type(label)
+                row_type = self.get_row_type(label, pos)
 
-                raw_val = df.at[idx_label, col]
+                raw_val = df.iloc[pos][col]
                 # Skip non-numeric cells (headers, subtitles, NaN)
                 numeric_val = None
                 if isinstance(raw_val, (int, float)):
@@ -911,7 +951,10 @@ class EarningsRelease:
     @classmethod
     def from_filing(cls, filing: 'Filing') -> Optional['EarningsRelease']:
         """
-        Find and wrap the EX-99.1 earnings exhibit from a filing.
+        Find and wrap the best EX-99 earnings exhibit from a filing.
+
+        Tries EX-99.1 first. If it has no income statement, tries subsequent
+        EX-99.* exhibits before falling back to EX-99.1.
 
         Args:
             filing: An SEC Filing object (typically an 8-K)
@@ -919,10 +962,27 @@ class EarningsRelease:
         Returns:
             EarningsRelease if an EX-99 exhibit is found, None otherwise.
         """
-        exhibit = find_earnings_exhibit(filing.attachments)
-        if exhibit:
-            return cls(exhibit)
-        return None
+        exhibits = find_earnings_exhibits(filing.attachments)
+        if not exhibits:
+            return None
+
+        # Try first exhibit (common case — EX-99.1)
+        first = cls(exhibits[0])
+        if len(exhibits) == 1:
+            return first
+
+        # If the first exhibit has an income statement, use it
+        if first.income_statement is not None:
+            return first
+
+        # Try remaining exhibits for one with an income statement
+        for exhibit in exhibits[1:]:
+            candidate = cls(exhibit)
+            if candidate.income_statement is not None:
+                return candidate
+
+        # No exhibit had an income statement — return the first one anyway
+        return first
 
     @property
     def document(self):
@@ -943,10 +1003,26 @@ class EarningsRelease:
 
     @property
     def detected_scale(self) -> Scale:
-        """Detect the primary scale used in the document."""
+        """Detect the primary scale used in the document.
+
+        Uses parenthetical patterns like '(in millions)' that appear near
+        financial tables, rather than bare word matches in narrative text.
+        """
         if self._scale is None:
-            text = self.document.text()
-            self._scale = Scale.detect(text)
+            text = self.document.text().lower()
+            # Look for explicit parenthetical scale markers near tables
+            # Matches: "(in millions", "(dollars in millions", "(amounts in millions"
+            _parens_millions = r'\((?:dollars |amounts |figures )?in\s+millions'
+            _parens_thousands = r'\((?:dollars |amounts |figures )?in\s+thousands'
+            _parens_billions = r'\((?:dollars |amounts |figures )?in\s+billions'
+            if re.search(_parens_millions, text):
+                self._scale = Scale.MILLIONS
+            elif re.search(_parens_thousands, text):
+                self._scale = Scale.THOUSANDS
+            elif re.search(_parens_billions, text):
+                self._scale = Scale.BILLIONS
+            else:
+                self._scale = Scale.UNITS
         return self._scale
 
     @property
@@ -1025,6 +1101,112 @@ class EarningsRelease:
                 return t
         return None
 
+    def get_key_metrics(self, quarterly: bool = True) -> dict:
+        """Extract headline metrics from the earnings release.
+
+        Returns a dict with the most commonly needed values:
+        revenue, net_income, eps_basic, eps_diluted, period, and scale.
+
+        Args:
+            quarterly: If True (default), prefer quarterly columns (3-month periods)
+                       over annual/YTD columns when both are present.
+
+        Returns:
+            Dict with keys: revenue, net_income, eps_basic, eps_diluted,
+            period (column header string), scale (Scale enum).
+            Values are None when not found.
+        """
+        result = {
+            'revenue': None,
+            'net_income': None,
+            'eps_basic': None,
+            'eps_diluted': None,
+            'period': None,
+            'scale': None,
+        }
+
+        inc = self.income_statement
+        if not inc:
+            return result
+
+        result['scale'] = inc.scale
+
+        # Select the best column (prefer quarterly if requested)
+        col = self._select_period_column(inc, quarterly=quarterly)
+        if col is None:
+            return result
+        result['period'] = str(col)
+
+        # Extract revenue — first row matching revenue patterns
+        revenue_patterns = ['revenue', 'net sales', 'total revenue', 'net revenue', 'sales']
+        net_income_patterns = ['net income', 'net loss', 'net earnings', 'net income (loss)']
+
+        df = inc.dataframe
+        for pos, idx_label in enumerate(df.index):
+            label_lower = str(idx_label).lower().strip()
+            val = df.iloc[pos][col]
+            if not isinstance(val, (int, float)):
+                continue
+
+            # Revenue (first match)
+            if result['revenue'] is None:
+                for pat in revenue_patterns:
+                    if pat in label_lower:
+                        scaled = val * inc.scale.value if inc.get_row_type(str(idx_label), pos) == RowType.AMOUNT and inc.scale != Scale.UNITS else val
+                        result['revenue'] = scaled
+                        break
+
+            # Net income (first match)
+            if result['net_income'] is None:
+                for pat in net_income_patterns:
+                    if pat in label_lower:
+                        scaled = val * inc.scale.value if inc.get_row_type(str(idx_label), pos) == RowType.AMOUNT and inc.scale != Scale.UNITS else val
+                        result['net_income'] = scaled
+                        break
+
+            # EPS — look for per-share rows
+            row_type = inc.get_row_type(str(idx_label), pos)
+            if row_type == RowType.PER_SHARE:
+                if result['eps_basic'] is None and 'basic' in label_lower:
+                    result['eps_basic'] = val  # Per-share rows are not scaled
+                elif result['eps_diluted'] is None and 'diluted' in label_lower:
+                    result['eps_diluted'] = val
+
+        return result
+
+    @staticmethod
+    def _select_period_column(table: 'FinancialTable', quarterly: bool = True) -> Optional[str]:
+        """Select the best period column from a table.
+
+        When quarterly=True, prefers 3-month columns over 12-month/YTD columns.
+        Falls back to the first period column if no quarterly column found.
+        """
+        if not table.periods:
+            # Fall back to first column
+            return table.dataframe.columns[0] if len(table.dataframe.columns) > 0 else None
+
+        if not quarterly:
+            return table.periods[0]
+
+        # Parse each period column and prefer quarterly (3-month) ones
+        quarterly_cols = []
+        annual_cols = []
+        for col in table.periods:
+            info = _parse_period_header(str(col))
+            duration = info.get('duration_months')
+            if duration and duration <= 3:
+                quarterly_cols.append(col)
+            elif duration and duration >= 12:
+                annual_cols.append(col)
+            else:
+                quarterly_cols.append(col)  # Unknown duration, assume quarterly
+
+        if quarterly_cols:
+            return quarterly_cols[0]
+        if annual_cols:
+            return annual_cols[0]
+        return table.periods[0]
+
     def to_facts_dataframe(self) -> pd.DataFrame:
         """Combine all financial tables into a single facts DataFrame.
 
@@ -1049,7 +1231,7 @@ class EarningsRelease:
     def _extract_tables(self) -> List[FinancialTable]:
         """Extract and classify all tables from the document."""
         tables = []
-        doc_scale = Scale.UNITS  # Safe default — per-table detection is primary
+        doc_scale = self.detected_scale  # Use document-level scale as fallback
 
         for idx, table_node in enumerate(self.document.tables):
             df = _extract_clean_dataframe(table_node)
@@ -1066,8 +1248,14 @@ class EarningsRelease:
             periods = [c for c in df.columns
                       if c and str(c).strip() and _YEAR_PATTERN.search(str(c))]
 
-            row_types = {str(idx_label): _classify_row_type(str(idx_label))
-                         for idx_label in df.index}
+            # Build row types as a positional list with parent context
+            # (list avoids collisions when duplicate labels like "Basic" appear
+            # in both EPS and share-count sections)
+            parent_contexts = df.attrs.get('_row_parent_contexts', [])
+            row_types = []
+            for i, idx_label in enumerate(df.index):
+                parent = parent_contexts[i] if i < len(parent_contexts) else ''
+                row_types.append(_classify_row_type(str(idx_label), parent))
 
             table = FinancialTable(
                 dataframe=df,
@@ -1149,7 +1337,7 @@ class EarningsRelease:
         Returns:
             String optimized for LLM input
         """
-        lines = [f"=== Earnings Release ==="]
+        lines = ["=== Earnings Release ==="]
         lines.append(f"Document: {self.attachment.document}")
         lines.append(f"Scale: {self.detected_scale.name.lower()}")
         lines.append("")
@@ -1190,37 +1378,54 @@ def get_earnings_tables(filing: 'Filing') -> List[FinancialTable]:
     return []
 
 
-def find_earnings_exhibit(attachments: 'Attachments') -> Optional['Attachment']:
+def find_earnings_exhibits(attachments: 'Attachments') -> List['Attachment']:
     """
-    Find the EX-99.1 (or similar) earnings press release exhibit.
+    Find all EX-99.* HTML exhibits that may contain earnings data.
+
+    Returns exhibits in order of priority (EX-99.1 first, then EX-99.2, etc.).
 
     Args:
         attachments: Attachments collection from a filing
 
     Returns:
-        The earnings exhibit Attachment if found, None otherwise.
+        List of HTML Attachment objects matching EX-99.* pattern.
     """
-    exhibit_patterns = [
-        r'EX-99\.1',
-        r'EX-99\.01',
-        r'EX-99',
-    ]
+    candidates = []
+    for attachment in attachments:
+        desc = (attachment.description or "").upper()
+        doc = (attachment.document or "").lower()
 
-    for pattern in exhibit_patterns:
-        for attachment in attachments:
-            desc = (attachment.description or "").upper()
-            doc = (attachment.document or "").lower()
+        is_ex99 = (re.search(r'EX-99', desc, re.IGNORECASE)
+                   or re.search(r'ex-?99', doc, re.IGNORECASE))
+        if not is_ex99:
+            continue
+        if any(x in doc for x in ['.xsd', '.xml', '_lab.', '_pre.', '_def.', '_cal.']):
+            continue
+        if attachment.is_html():
+            candidates.append(attachment)
 
-            if re.search(pattern, desc, re.IGNORECASE):
-                if any(x in doc for x in ['.xsd', '.xml', '_lab.', '_pre.', '_def.', '_cal.']):
-                    continue
-                if attachment.is_html():
-                    return attachment
+    # Sort by exhibit number (EX-99.1 before EX-99.2, etc.)
+    def _exhibit_sort_key(att):
+        desc = (att.description or "")
+        m = re.search(r'EX-99\.?(\d+)', desc, re.IGNORECASE)
+        return int(m.group(1)) if m else 99
+    candidates.sort(key=_exhibit_sort_key)
 
-            if re.search(r'ex-?99', doc, re.IGNORECASE) and attachment.is_html():
-                return attachment
+    return candidates
 
-    return None
+
+def find_earnings_exhibit(attachments: 'Attachments') -> Optional['Attachment']:
+    """
+    Find the first EX-99 HTML exhibit from a filing's attachments.
+
+    Args:
+        attachments: Attachments collection from a filing
+
+    Returns:
+        The first EX-99 HTML Attachment if found, None otherwise.
+    """
+    candidates = find_earnings_exhibits(attachments)
+    return candidates[0] if candidates else None
 
 
 # =============================================================================
@@ -1243,9 +1448,9 @@ def _classify_statement(table_node, df: pd.DataFrame) -> StatementType:
             if pattern in header_text:
                 return stmt_type
 
-    # 2. Keyword matching on row labels (expanded range)
+    # 2. Keyword matching on row labels (scan all rows for classification)
     labels = []
-    for row in table_node.rows[:20]:
+    for row in table_node.rows[:40]:
         for cell in row.cells:
             content = (cell.content or "").strip()
             if content and len(content) > 3:
@@ -1253,7 +1458,7 @@ def _classify_statement(table_node, df: pd.DataFrame) -> StatementType:
                 break
 
     if hasattr(df, 'index'):
-        labels.extend([str(x).lower() for x in df.index[:20]])
+        labels.extend([str(x).lower() for x in df.index])
 
     labels_text = ' '.join(labels)
 
@@ -1333,6 +1538,27 @@ def _detect_table_scale(table_node, df: pd.DataFrame, default_scale: Scale) -> S
                 return Scale.THOUSANDS
             elif 'in billions' in label_lower or '(billions)' in label_lower:
                 return Scale.BILLIONS
+
+    # 6. Check preceding sibling nodes (scale text often in a paragraph before the table)
+    if hasattr(table_node, 'parent') and table_node.parent and hasattr(table_node.parent, 'children'):
+        siblings = table_node.parent.children
+        for idx, child in enumerate(siblings):
+            if child is table_node:
+                # Check up to 3 preceding siblings
+                for si in range(max(0, idx - 3), idx):
+                    sib = siblings[si]
+                    sib_text = sib.content or ''
+                    if not sib_text and hasattr(sib, 'text') and callable(sib.text):
+                        sib_text = sib.text() or ''
+                    if sib_text:
+                        sib_lower = sib_text.lower()
+                        if 'in thousands' in sib_lower or '(thousands)' in sib_lower:
+                            return Scale.THOUSANDS
+                        elif 'in millions' in sib_lower or '(millions)' in sib_lower:
+                            return Scale.MILLIONS
+                        elif 'in billions' in sib_lower or '(billions)' in sib_lower:
+                            return Scale.BILLIONS
+                break
 
     return default_scale
 
@@ -1438,6 +1664,8 @@ def _extract_clean_dataframe(table_node) -> pd.DataFrame:
 
     row_labels = []
     row_data = []
+    row_parent_contexts = []  # Parent context for each data row (for row type classification)
+    current_parent_context = ''  # Tracks the most recent label-only row
 
     # Track if we should skip date-header rows from data
     skip_date_rows = bool(date_headers_from_rows)
@@ -1492,8 +1720,13 @@ def _extract_clean_dataframe(table_node) -> pd.DataFrame:
 
         if label_cell and data_cells:
             row_labels.append(label_cell)
+            # Track parent context for this row (used for row type classification)
+            row_parent_contexts.append(current_parent_context)
             merged_data = _merge_currency_symbols(data_cells)
             row_data.append(merged_data)
+        elif label_cell and not data_cells:
+            # Label-only row (e.g., "Earnings per share:") — track as parent context
+            current_parent_context = label_cell
 
     if not row_data:
         return pd.DataFrame()
@@ -1535,6 +1768,9 @@ def _extract_clean_dataframe(table_node) -> pd.DataFrame:
     # Convert numeric columns (using positional indexing to handle duplicate column names)
     for i, col in enumerate(df.columns):
         df.iloc[:, i] = df.iloc[:, i].apply(_parse_numeric)
+
+    # Attach parent contexts for row type classification
+    df.attrs['_row_parent_contexts'] = row_parent_contexts[:len(df)]
 
     return df
 

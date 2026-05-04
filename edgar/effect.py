@@ -1,4 +1,3 @@
-from functools import lru_cache
 from typing import Optional
 
 import pandas as pd
@@ -94,17 +93,53 @@ class Effect:
                 return filings[0]
         return None
 
-    @lru_cache(maxsize=1)
     def summary(self) -> pd.DataFrame:
-        return pd.DataFrame([{"cik": self.cik,
+        if hasattr(self, '_cached_summary'):
+            return self._cached_summary
+        self._cached_summary = pd.DataFrame([{"cik": self.cik,
                               "entity": self.entity,
                               "source": self.source_submission_type or "",
                               "live": self.is_live,
                               "effective": self.effective_date}]).set_index("entity")
+        return self._cached_summary
 
     def __str__(self):
         return (f"EffectSubmission(effective='{self.effective_date}', type='{self.submission_type}', "
                 f"is_live={self.is_live}, entity='{self.entity}')")
+
+    def to_context(self, detail: str = 'standard') -> str:
+        """
+        AI-optimized context string.
+
+        Args:
+            detail: 'minimal' (~100 tokens), 'standard' (~300 tokens), 'full' (~500+ tokens)
+        """
+        lines = []
+
+        # === IDENTITY ===
+        lines.append(f"EFFECT: {self.entity}")
+        lines.append("")
+
+        # === CORE METADATA ===
+        lines.append(f"Effective Date: {self.effective_date}")
+        lines.append(f"Source Form: {self.source_submission_type}")
+        if self.source_accession_no:
+            lines.append(f"Source Accession: {self.source_accession_no}")
+
+        if detail == 'minimal':
+            return "\n".join(lines)
+
+        # === STANDARD ===
+        lines.append(f"CIK: {self.cik}")
+
+        lines.append("")
+        lines.append("AVAILABLE ACTIONS:")
+        lines.append("  .get_source_filing()       Navigate to the source filing")
+        lines.append("  .summary()                 Summary as DataFrame")
+        lines.append("  .effective_date            When the filing became effective")
+        lines.append("  .source_submission_type    Form type that was made effective")
+
+        return "\n".join(lines)
 
     def __rich__(self):
         return Group(Text(f"{self.submission_type} filing for form {self.source_submission_type} filing", style="bold"),

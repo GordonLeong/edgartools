@@ -26,14 +26,12 @@ logger = logging.getLogger(__name__)
 
 @tool(
     name="edgar_company",
-    description="""Get company information and analysis. Combines profile, financials,
-filings, and ownership data in one call. Use 'include' to control what data is returned.
+    description="""Use this as the starting point for any company-level question. Returns profile, financials, recent filings, and ownership data in one call. Control what's included with the 'include' parameter.
 
 Examples:
-- Basic info: identifier="AAPL"
-- Full analysis: identifier="AAPL", include=["profile", "financials", "filings", "ownership"]
-- Just financials: identifier="MSFT", include=["financials"], periods=8
-- TTM financials: identifier="AAPL", include=["financials"], period="ttm", periods=4""",
+- Company overview: identifier="AAPL"
+- Financials only: identifier="MSFT", include=["financials"], periods=8
+- Full analysis: identifier="AAPL", include=["profile", "financials", "filings", "ownership"]""",
     params={
         "identifier": {
             "type": "string",
@@ -121,7 +119,7 @@ async def edgar_company(
         if "ownership" not in include:
             next_steps.append("Add 'ownership' to include for insider/institutional data")
         next_steps.append("Use edgar_compare to compare with peer companies")
-        next_steps.append("Use edgar_filing to read specific SEC filing content")
+        next_steps.append("Use edgar_read to read specific filing sections (risk factors, MD&A, etc.)")
 
         return success(result, next_steps=next_steps)
 
@@ -222,10 +220,12 @@ def _build_ownership(company) -> dict:
 
     # Insider transactions (Form 4)
     try:
-        form4_filings = company.get_filings(form="4").head(20)
+        all_form4 = company.get_filings(form="4")
+        total_form4_count = len(all_form4)
+        form4_filings = all_form4.head(10)
         insider_txns = []
 
-        for filing in form4_filings[:10]:
+        for filing in form4_filings:
             try:
                 txn = {
                     "date": str(filing.filing_date),
@@ -246,7 +246,7 @@ def _build_ownership(company) -> dict:
                 continue
 
         ownership["insider_transactions"] = insider_txns
-        ownership["insider_filing_count"] = len(form4_filings)
+        ownership["insider_filing_count"] = total_form4_count
 
     except Exception as e:
         logger.debug(f"Could not get insider data: {e}")

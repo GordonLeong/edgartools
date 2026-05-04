@@ -4,6 +4,7 @@ BDC Portfolio Investment data models.
 This module provides structured access to individual investment holdings
 from a BDC's Schedule of Investments (SOI).
 """
+import logging
 import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -16,6 +17,8 @@ from rich.panel import Panel
 from rich.table import Table
 
 from edgar.richtools import repr_rich
+
+log = logging.getLogger(__name__)
 
 __all__ = [
     'DataQuality',
@@ -33,10 +36,15 @@ CONCEPT_PIK_RATE = 'us-gaap_InvestmentInterestRatePaidInKind'
 CONCEPT_SPREAD = 'us-gaap_InvestmentBasisSpreadVariableRate'
 CONCEPT_PCT_NET_ASSETS = 'us-gaap_InvestmentOwnedPercentOfNetAssets'
 
+# Entity-level aggregate concepts (not per-investment)
+CONCEPT_NONACCRUAL_LOANS_FV = 'us-gaap:FairValueOptionLoansHeldAsAssetsAggregateAmountInNonaccrualStatus'
+
 # Known investment types for parsing (order matters - more specific first)
 INVESTMENT_TYPES = [
     # Secured Debt (used by some BDCs like Main Street)
+    'First lien debt',
     'First lien secured debt',
+    'Second lien debt',
     'Second lien secured debt',
     'Senior secured debt',
     'Secured debt',
@@ -183,6 +191,13 @@ INVESTMENT_TYPES = [
     'Class A-1 common stock',
     'Series C common units',
     'Common member units',
+    # BDC-specific instrument types
+    'One stop',  # GBDC's primary type — unitranche / single-tranche loans
+    'Delayed draw term loan',
+    'Delayed draw',
+    'Structured mezzanine',
+    'ABF Equity',  # Asset-based finance equity
+    'Senior secured',  # HTGC format
     # Other
     'Loan instrument units',
     'Co-invest units',
@@ -198,7 +213,8 @@ def _parse_investment_identifier(dimension_label: str) -> tuple[str, str, str]:
     Handles multiple formats:
     1. ARCC format: "Company Name, First lien senior secured loan"
     2. HTGC format: "Debt Investments Software and Armis, Inc., Senior Secured, Maturity Date..."
-    3. Category rollups: "Debt Investments Software (52.80%)" - treated as Unknown type
+    3. FDUS format: "Non-control/Non-affiliate Investments Company LLC Industry First Lien Debt ..."
+    4. Category rollups: "Debt Investments Software (52.80%)" - treated as Unknown type
 
     Args:
         dimension_label: The full dimension label, e.g.,
@@ -222,7 +238,106 @@ def _parse_investment_identifier(dimension_label: str) -> tuple[str, str, str]:
     company_name = identifier
     investment_type = "Unknown"
 
-    # Try standard format first (investment type at end)
+    # Some FDUS labels leak relationship-prefix fragments into the company
+    # name, e.g. "Investmnts Suited Connector LLC" or
+    # "InvesAffiliate Investments Medsurant Holdings LLC".
+    normalized_identifier = re.sub(
+        r'^(?:InvesAffiliate Investments|Investmnts)\s+',
+        '',
+        identifier,
+        flags=re.IGNORECASE,
+    )
+
+    # Try FDUS prose format:
+    # "Non-control/Non-affiliate Investments Company Name LLC Industry First Lien Debt ..."
+    # Some labels omit the trailing "Investments" and some use bare "Subordinated".
+    fdus_match = re.match(
+        r'^(?P<prefix>'
+        r'Non-control/Non-affiliate(?: Investments| Investmnts)?|'
+        r'Affiliate(?: Investments| InvesAffiliate Investments)?|'
+        r'Control(?: Investments)?'
+        r')\s+'
+        r'(?P<body>.+?)\s+'
+        r'(?P<instrument>'
+        r'First Lien Debt|Second Lien Debt|Subordinated Debt|Subordinated|'
+        r'Revolving Loan|Term Loan|Unsecured Debt|Unsecured Loan|'
+        r'Common Equity|Preferred Equity|Warrant|Warrants'
+        r')\b',
+        normalized_identifier,
+        re.IGNORECASE,
+    )
+    if fdus_match:
+        company_name = normalized_identifier
+        investment_type = fdus_match.group('instrument').strip()
+        body = fdus_match.group('body').strip()
+
+        if re.match(
+            r'^.*\b('
+            r'LLC|L\.L\.C\.|LLP|L\.P\.|LP|Ltd|Limited|Inc|Corp|Co|'
+            r'Corporation|Company|Holdings|Partners|Group|PLC'
+            r')\.?(?:\s*\([^)]*\))?$',
+            body,
+            re.IGNORECASE,
+        ):
+            return identifier, body, investment_type
+
+        # FDUS places an industry label between the company name and instrument.
+        # Prefer a company-like prefix ending in a legal suffix, followed by one
+        # or more title-cased industry words.
+        entity_match = re.match(
+            r'^(?P<company>.*\b(?:'
+            r'LLC|L\.L\.C\.|LLP|L\.P\.|LP|Ltd|Limited|Inc|Corp|Co|'
+            r'Corporation|Company|Holdings|Partners|Group|PLC'
+            r')\.?(?:\s*\([^)]*\))?)'
+            r'(?:\s+[A-Z&][A-Za-z&:/-]*)+$',
+            body,
+            re.IGNORECASE,
+        )
+        if entity_match:
+            company_name = entity_match.group('company').strip()
+        else:
+            company_name = re.sub(
+                r'\s+[A-Z][A-Za-z&:/-]*(?:\s+[A-Z][A-Za-z&:/-]*){0,3}$',
+                '',
+                body,
+            ).strip()
+            if not company_name:
+                company_name = body
+        return identifier, company_name, investment_type
+
+    # Try pipe-separated format (e.g., "Company | Type" or "Company, Type | Industry")
+    # Some BDCs (Blue Owl) put instrument type after pipe; others (FSK) put GICS
+    # industry category after pipe. We check if the pipe-right matches a known
+    # instrument type — if not, it's an industry label and we parse the left side.
+    if ' | ' in identifier:
+        pipe_parts = [p.strip() for p in identifier.split(' | ')]
+        if len(pipe_parts) >= 2:
+            right_side = pipe_parts[1]
+            # Strip numeric suffix for matching (e.g., "Software & Services 1" → "Software & Services")
+            right_base = re.sub(r'\s*\d+\s*$', '', right_side)
+            right_is_instrument = any(
+                right_base.lower() == inv_type.lower() for inv_type in INVESTMENT_TYPES
+            )
+            if right_is_instrument:
+                company_name = pipe_parts[0]
+                investment_type = right_side
+                return identifier, company_name, investment_type
+            else:
+                # Right side is an industry category (FSK pattern).
+                # Parse the left side for comma-separated instrument type.
+                left_side = pipe_parts[0]
+                for inv_type in INVESTMENT_TYPES:
+                    pattern = rf',\s*{re.escape(inv_type)}(\s*[\d.]*)?$'
+                    match = re.search(pattern, left_side, re.IGNORECASE)
+                    if match:
+                        company_name = left_side[:match.start()].strip()
+                        investment_type = left_side[match.start() + 1:].strip()
+                        return identifier, company_name, investment_type
+                # No instrument type found in left side either — bare company name
+                company_name = left_side
+                # Fall through to remaining parsing logic
+
+    # Try standard comma-separated format (investment type at end)
     for inv_type in INVESTMENT_TYPES:
         # Look for the investment type at the end, preceded by comma
         # Support optional numeric suffixes like "1", "2", "1.1", "2.1"
@@ -249,6 +364,12 @@ def _parse_investment_identifier(dimension_label: str) -> tuple[str, str, str]:
        identifier.startswith('Investment Fund ') or identifier.startswith('Debt Investments (') or \
        identifier.startswith('Equity Investments ('):
         return identifier, identifier, "Unknown"
+
+    # If we reach here with no match, this is a bare company name (e.g. HTGC's "Armis, Inc.")
+    # or an unrecognized format — not a rollup. Mark as "Unclassified" so it can be
+    # distinguished from rollup "Unknown" entries and retained in the portfolio.
+    if investment_type == "Unknown":
+        investment_type = "Unclassified"
 
     return identifier, company_name, investment_type
 
@@ -327,15 +448,39 @@ class PortfolioInvestment:
 
     @property
     def is_debt(self) -> bool:
-        """Check if this is a debt investment."""
-        debt_types = ['loan', 'debt', 'mezzanine']
-        return any(t in self.investment_type.lower() for t in debt_types)
+        """Check if this is a debt investment.
+
+        Uses a two-tier approach: first checks the investment type label for
+        debt keywords, then falls back to XBRL data signals (principal amount
+        or interest rate implies debt).
+        """
+        type_lower = self.investment_type.lower()
+        debt_keywords = ['loan', 'debt', 'mezzanine', 'note', 'one stop',
+                         'revolver', 'revolving', 'senior secured', 'lien']
+        if any(kw in type_lower for kw in debt_keywords):
+            return True
+        # Data-driven fallback: if we have principal or interest rate, it's debt
+        if self.principal_amount is not None or self.interest_rate is not None:
+            return True
+        return False
 
     @property
     def is_equity(self) -> bool:
-        """Check if this is an equity investment."""
-        equity_types = ['equity', 'stock', 'shares', 'warrants', 'units', 'membership']
-        return any(t in self.investment_type.lower() for t in equity_types)
+        """Check if this is an equity investment.
+
+        Uses a two-tier approach: first checks the investment type label for
+        equity keywords, then falls back to XBRL data signals (shares count
+        without principal implies equity).
+        """
+        type_lower = self.investment_type.lower()
+        equity_keywords = ['equity', 'stock', 'shares', 'warrant', 'units',
+                           'membership', 'interest', 'certificate', 'lp ']
+        if any(kw in type_lower for kw in equity_keywords):
+            return True
+        # Data-driven fallback: shares without principal or interest rate
+        if self.shares is not None and self.principal_amount is None and self.interest_rate is None:
+            return True
+        return False
 
     def __rich__(self):
         table = Table(box=box.SIMPLE, show_header=False, padding=(0, 1))
@@ -391,10 +536,12 @@ class PortfolioInvestments:
     def __init__(
         self,
         investments: list[PortfolioInvestment],
-        period: Optional[str] = None
+        period: Optional[str] = None,
+        nonaccrual_fair_value: Optional[Decimal] = None,
     ):
         self._investments = investments
         self._period = period
+        self._nonaccrual_fair_value = nonaccrual_fair_value
 
     def __len__(self) -> int:
         return len(self._investments)
@@ -427,16 +574,32 @@ class PortfolioInvestments:
                 equity_count=0,
             )
 
+        debt_investments = [i for i in self._investments if i.is_debt]
+        debt_count = len(debt_investments)
+        equity_count = sum(1 for i in self._investments if i.is_equity)
+
         return DataQuality(
             total_investments=total,
-            fair_value_coverage=sum(1 for i in self._investments if i.fair_value) / total,
-            cost_coverage=sum(1 for i in self._investments if i.cost) / total,
-            principal_coverage=sum(1 for i in self._investments if i.principal_amount) / total,
-            interest_rate_coverage=sum(1 for i in self._investments if i.interest_rate) / total,
-            pik_rate_coverage=sum(1 for i in self._investments if i.pik_rate) / total,
-            spread_coverage=sum(1 for i in self._investments if i.spread) / total,
-            debt_count=sum(1 for i in self._investments if i.is_debt),
-            equity_count=sum(1 for i in self._investments if i.is_equity),
+            fair_value_coverage=sum(1 for i in self._investments if i.fair_value is not None) / total,
+            cost_coverage=sum(1 for i in self._investments if i.cost is not None) / total,
+            principal_coverage=(
+                sum(1 for i in debt_investments if i.principal_amount is not None) / debt_count
+                if debt_count > 0 else 0.0
+            ),
+            interest_rate_coverage=(
+                sum(1 for i in debt_investments if i.interest_rate is not None) / debt_count
+                if debt_count > 0 else 0.0
+            ),
+            pik_rate_coverage=(
+                sum(1 for i in debt_investments if i.pik_rate is not None) / debt_count
+                if debt_count > 0 else 0.0
+            ),
+            spread_coverage=(
+                sum(1 for i in debt_investments if i.spread is not None) / debt_count
+                if debt_count > 0 else 0.0
+            ),
+            debt_count=debt_count,
+            equity_count=equity_count,
         )
 
     @property
@@ -459,6 +622,56 @@ class PortfolioInvestments:
     def total_unrealized_gain_loss(self) -> Decimal:
         """Total unrealized gain/loss across all investments."""
         return self.total_fair_value - self.total_cost
+
+    # --- Health metrics ---
+
+    @property
+    def nonaccrual_fair_value(self) -> Optional[Decimal]:
+        """Fair value of loans on non-accrual status (entity-level aggregate from XBRL).
+
+        Returns None if the BDC does not tag this concept in its filing.
+        """
+        return self._nonaccrual_fair_value
+
+    @property
+    def non_accrual_rate(self) -> Optional[float]:
+        """Non-accrual rate: fair value of non-accrual loans / total fair value.
+
+        Returns None if non-accrual data is not available in the filing.
+        The BDC sector average is ~0.7%. Rates above 1.5% warrant investigation;
+        above 3% is a serious credit quality signal.
+        """
+        if self._nonaccrual_fair_value is None:
+            return None
+        total_fv = self.total_fair_value
+        if not total_fv:
+            return 0.0
+        return float(self._nonaccrual_fair_value / total_fv)
+
+    @property
+    def pik_investments(self) -> list[PortfolioInvestment]:
+        """Investments with Payment-In-Kind interest."""
+        return [inv for inv in self._investments if inv.pik_rate]
+
+    @property
+    def pik_fair_value(self) -> Decimal:
+        """Total fair value of PIK investments."""
+        return sum(
+            (inv.fair_value for inv in self._investments
+             if inv.pik_rate and inv.fair_value is not None),
+            Decimal(0)
+        )
+
+    @property
+    def pik_exposure(self) -> float:
+        """PIK exposure: fair value of PIK investments / total fair value.
+
+        Returns 0.0 if no investments or no fair value data.
+        """
+        total_fv = self.total_fair_value
+        if not total_fv:
+            return 0.0
+        return float(self.pik_fair_value / total_fv)
 
     def filter(
         self,
@@ -497,7 +710,88 @@ class PortfolioInvestments:
                 if inv.fair_value is not None and inv.fair_value >= min_fair_value
             ]
 
-        return PortfolioInvestments(investments, period=self._period)
+        return PortfolioInvestments(investments, period=self._period,
+                                    nonaccrual_fair_value=self._nonaccrual_fair_value)
+
+    def to_context(self, detail: str = 'standard') -> str:
+        """
+        AI-optimized context string for LLM consumption.
+
+        Args:
+            detail: 'minimal' (~100 tokens), 'standard' (~350 tokens),
+                    'full' (~600+ tokens with top holdings)
+        """
+        lines: list = []
+        lines.append('BDC PORTFOLIO INVESTMENTS')
+        lines.append('')
+
+        if self._period:
+            lines.append(f'Period: {self._period}')
+        lines.append(f'Holdings: {len(self._investments)}')
+        lines.append(f'Total Fair Value: ${self.total_fair_value:,.0f}')
+        lines.append(f'Total Cost: ${self.total_cost:,.0f}')
+
+        gain_loss = self.total_unrealized_gain_loss
+        lines.append(f'Unrealized Gain/Loss: ${gain_loss:,.0f}')
+
+        dq = self.data_quality
+        lines.append(f'Composition: {dq.debt_count} debt, {dq.equity_count} equity')
+
+        # Health metrics
+        if self._nonaccrual_fair_value is not None:
+            rate = self.non_accrual_rate
+            lines.append(f'Non-Accrual: ${self._nonaccrual_fair_value:,.0f} ({rate:.1%})')
+
+        pik = self.pik_investments
+        if pik:
+            lines.append(f'PIK: {len(pik)} investments (${self.pik_fair_value:,.0f}, {self.pik_exposure:.1%})')
+
+        if detail == 'minimal':
+            return '\n'.join(lines)
+
+        # Data quality
+        lines.append('')
+        lines.append('DATA QUALITY:')
+        lines.append(f'  Fair Value Coverage: {dq.fair_value_coverage:.0%}')
+        lines.append(f'  Cost Coverage: {dq.cost_coverage:.0%}')
+        if dq.debt_count > 0:
+            lines.append(f'  Principal Coverage (debt): {dq.principal_coverage:.0%}')
+            lines.append(f'  Interest Rate Coverage (debt): {dq.interest_rate_coverage:.0%}')
+
+        # Top holdings
+        lines.append('')
+        limit = 10 if detail == 'standard' else 20
+        lines.append(f'TOP {min(limit, len(self._investments))} HOLDINGS BY FAIR VALUE:')
+        for inv in self._investments[:limit]:
+            fv = f'${inv.fair_value:,.0f}' if inv.fair_value is not None else 'N/A'
+            lines.append(f'  {inv.company_name} ({inv.investment_type}) — {fv}')
+
+        if detail == 'standard':
+            lines.append('')
+            lines.append('AVAILABLE ACTIONS:')
+            lines.append('  .filter(investment_type=, company_name=)   Filter investments')
+            lines.append('  .to_dataframe()      All holdings as DataFrame')
+            lines.append('  .data_quality        Coverage metrics')
+            lines.append('  .non_accrual_rate    Non-accrual rate at FV')
+            lines.append('  .pik_exposure        PIK as % of portfolio')
+            return '\n'.join(lines)
+
+        # Full: investment type breakdown
+        from collections import Counter
+        type_counts = Counter(inv.investment_type for inv in self._investments)
+        lines.append('')
+        lines.append('INVESTMENT TYPE BREAKDOWN:')
+        for t, c in type_counts.most_common(15):
+            lines.append(f'  {t}: {c}')
+
+        lines.append('')
+        lines.append('AVAILABLE ACTIONS:')
+        lines.append('  .filter(investment_type=, company_name=)   Filter investments')
+        lines.append('  .to_dataframe()      All holdings as DataFrame')
+        lines.append('  .data_quality        Coverage metrics')
+        lines.append('  .non_accrual_rate    Non-accrual rate at FV')
+        lines.append('  .pik_exposure        PIK as % of portfolio')
+        return '\n'.join(lines)
 
     def to_dataframe(self) -> pd.DataFrame:
         """Convert to pandas DataFrame."""
@@ -561,6 +855,24 @@ class PortfolioInvestments:
         gain_loss = self.total_unrealized_gain_loss
         style = "green" if gain_loss >= 0 else "red"
         summary.add_row("Unrealized G/L", f"[{style}]${gain_loss:,.0f}[/{style}]")
+
+        # Health metrics
+        if self._nonaccrual_fair_value is not None:
+            rate = self.non_accrual_rate
+            rate_style = "green" if rate < 0.015 else ("yellow" if rate < 0.03 else "red")
+            summary.add_row(
+                "Non-Accrual",
+                f"[{rate_style}]${self._nonaccrual_fair_value:,.0f} ({rate:.1%})[/{rate_style}]"
+            )
+
+        pik_invs = self.pik_investments
+        if pik_invs:
+            pik_fv = self.pik_fair_value
+            pik_exp = self.pik_exposure
+            summary.add_row(
+                "PIK",
+                f"{len(pik_invs)} investments (${pik_fv:,.0f}, {pik_exp:.1%})"
+            )
 
         from rich.console import Group
         return Panel(
@@ -786,6 +1098,28 @@ class PortfolioInvestments:
             except (ValueError, TypeError, InvalidOperation):
                 pass
 
+        # Extract non-accrual data using footnote-based extraction
+        nonaccrual_fv = None
+        try:
+            from edgar.bdc.nonaccrual import _extract_nonaccrual_from_xbrl
+            nonaccrual_result = _extract_nonaccrual_from_xbrl(xbrl, period, all_facts=all_facts)
+            if nonaccrual_result is not None:
+                nonaccrual_fv = nonaccrual_result.nonaccrual_fair_value
+        except Exception as e:
+            # Fall back to the single-concept check if extraction fails
+            log.warning(f"Non-accrual footnote extraction failed, falling back to aggregate concept: {e}")
+            for fact in all_facts:
+                if (fact.get('concept') == CONCEPT_NONACCRUAL_LOANS_FV
+                        and fact.get('period_instant') == period
+                        and not fact.get(dim_key)):
+                    value = fact.get('numeric_value') or fact.get('value')
+                    if value is not None and not pd.isna(value):
+                        try:
+                            nonaccrual_fv = Decimal(str(value))
+                        except (ValueError, InvalidOperation):
+                            pass
+                        break
+
         # Create PortfolioInvestment objects
         portfolio = [
             PortfolioInvestment(**inv_data)
@@ -802,4 +1136,4 @@ class PortfolioInvestments:
             reverse=True
         )
 
-        return cls(portfolio, period=period)
+        return cls(portfolio, period=period, nonaccrual_fair_value=nonaccrual_fv)

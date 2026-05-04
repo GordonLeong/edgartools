@@ -25,6 +25,10 @@ __all__ = [
 
 THIRTEENF_FORMS = ['13F-HR', "13F-HR/A", "13F-NT", "13F-NT/A", "13F-CTR", "13F-CTR/A"]
 
+# The SEC changed 13F XML schema around Q4 2022: <value> went from thousands to dollars.
+# Filings with report_period on or before this date have values in thousands.
+_13F_VALUE_IN_THOUSANDS_CUTOFF = datetime(2022, 9, 30)
+
 
 def format_date(date: Union[str, datetime]) -> str:
     if isinstance(date, str):
@@ -352,10 +356,16 @@ class ThirteenF:
         if self.has_infotable():
             # Try XML format first
             if self.infotable_xml:
-                return parse_infotable_xml(self.infotable_xml)
+                df = parse_infotable_xml(self.infotable_xml)
             # Fall back to TXT format
             elif self.infotable_txt:
-                return parse_infotable_txt(self.infotable_txt)
+                df = parse_infotable_txt(self.infotable_txt)
+            else:
+                return None
+            # Normalize pre-Q4 2022 values from thousands to dollars
+            if df is not None and len(df) > 0 and self._value_in_thousands:
+                df['Value'] = df['Value'] * 1000
+            return df
         return None
 
     @cached_property
@@ -468,10 +478,13 @@ class ThirteenF:
 
     @property
     def total_value(self):
-        """Total value of holdings in thousands of dollars"""
+        """Total value of holdings in dollars"""
         if self.primary_form_information:
-            return self.primary_form_information.summary_page.total_value
-        # For TXT-only filings, calculate from infotable
+            value = self.primary_form_information.summary_page.total_value
+            if value and self._value_in_thousands:
+                return value * 1000
+            return value
+        # For TXT-only filings, calculate from infotable (already normalized)
         infotable = self.infotable
         if infotable is not None and len(infotable) > 0:
             return Decimal(int(infotable['Value'].sum()))
@@ -509,6 +522,22 @@ class ThirteenF:
             if summary_page and summary_page.other_managers:
                 return summary_page.other_managers
         return []
+
+    @property
+    def _report_period_dt(self) -> Optional[datetime]:
+        """Report period as a datetime (for internal comparisons)."""
+        if self.primary_form_information:
+            return self.primary_form_information.report_period
+        if hasattr(self.filing, 'period_of_report') and self.filing.period_of_report:
+            por = self.filing.period_of_report
+            return datetime.strptime(por, "%Y-%m-%d") if isinstance(por, str) else por
+        return None
+
+    @property
+    def _value_in_thousands(self) -> bool:
+        """True if this filing's values are in thousands (pre-Q4 2022 schema)."""
+        dt = self._report_period_dt
+        return dt is not None and dt <= _13F_VALUE_IN_THOUSANDS_CUTOFF
 
     @property
     def report_period(self):
@@ -1070,6 +1099,157 @@ class ThirteenF:
             manager_name=self.management_company_name,
             display_limit=display_limit,
         )
+
+    def to_context(self, detail: str = 'standard') -> str:
+        """
+        AI-optimized context string.
+
+        Args:
+            detail: 'minimal' (~100 tokens), 'standard' (~300 tokens), 'full' (~500+ tokens)
+        """
+        from edgar.display.formatting import format_currency_short
+
+        lines = []
+
+        # === IDENTITY ===
+        lines.append(f"THIRTEENF: {self.management_company_name}")
+        lines.append("")
+
+        # === CORE METADATA ===
+        lines.append(f"Report Date: {self.report_period}")
+
+        if detail == 'minimal':
+            try:
+                total_val = self.total_value
+                if total_val is not None:
+                    lines.append(f"Holdings: {self.total_holdings}")
+                    lines.append(f"Total Value: {format_currency_short(float(total_val))}")
+            except Exception:
+                pass
+            return "\n".join(lines)
+
+        # === STANDARD ===
+        lines.append(f"CIK: {str(self.filing.cik).zfill(10)}")
+        lines.append(f"Filed: {self.filing_date}")
+        lines.append(f"Form: {self.form}")
+
+        # Summary section
+        lines.append("")
+        lines.append("SUMMARY:")
+        try:
+            lines.append(f"  Holdings: {self.total_holdings}")
+            total_val = self.total_value
+            if total_val is not None:
+                lines.append(f"  Total Value: {format_currency_short(float(total_val))}")
+        except Exception:
+            pass
+
+        # Top holdings
+        top_n = 5
+        try:
+            holdings_df = self.holdings
+            if holdings_df is not None and len(holdings_df) > 0:
+                total_val_f = float(self.total_value) if self.total_value else None
+                lines.append("")
+                lines.append("TOP HOLDINGS:")
+                for _, row in holdings_df.head(top_n).iterrows():
+                    issuer = row.get('Issuer', '?')
+                    val = float(row.get('Value', 0))
+                    h_line = f"  {issuer}: {format_currency_short(val)}"
+                    if total_val_f and total_val_f > 0:
+                        pct = val / total_val_f * 100
+                        h_line += f" ({pct:.1f}%)"
+                    lines.append(h_line)
+                remaining = len(holdings_df) - top_n
+                if remaining > 0:
+                    lines.append(f"  ... ({remaining} more)")
+        except Exception:
+            pass
+
+        # Available actions
+        lines.append("")
+        lines.append("AVAILABLE ACTIONS:")
+        lines.append("  .holdings                    All holdings as DataFrame")
+        lines.append("  .holdings_view()             Formatted holdings table")
+        lines.append("  .compare_holdings()          Quarter-over-quarter changes")
+        lines.append("  .holding_history()           Multi-quarter history")
+        lines.append("  .investment_manager          Manager name and address")
+        lines.append("  .previous_holding_report()   Prior quarter filing")
+
+        if detail == 'standard':
+            return "\n".join(lines)
+
+        # === FULL: top 10 instead of 5, manager details, signer ===
+        try:
+            holdings_df = self.holdings
+            if holdings_df is not None and len(holdings_df) > top_n:
+                extra = holdings_df.iloc[top_n:10]
+                if len(extra) > 0:
+                    # Find the overflow line and replace with additional holdings
+                    insert_idx = None
+                    for i, l in enumerate(lines):
+                        if l.startswith("  ... ("):
+                            insert_idx = i
+                            break
+                    if insert_idx is not None:
+                        extra_lines = []
+                        total_val_f = float(self.total_value) if self.total_value else None
+                        for _, row in extra.iterrows():
+                            issuer = row.get('Issuer', '?')
+                            val = float(row.get('Value', 0))
+                            h_line = f"  {issuer}: {format_currency_short(val)}"
+                            if total_val_f and total_val_f > 0:
+                                pct = val / total_val_f * 100
+                                h_line += f" ({pct:.1f}%)"
+                            extra_lines.append(h_line)
+                        remaining_full = len(holdings_df) - 10
+                        overflow = f"  ... ({remaining_full} more)" if remaining_full > 0 else None
+                        lines[insert_idx:insert_idx + 1] = extra_lines + ([overflow] if overflow else [])
+        except Exception:
+            pass
+
+        # Manager details
+        try:
+            mgr = self.investment_manager
+            if mgr and mgr.address:
+                addr = mgr.address
+                addr_parts = []
+                if hasattr(addr, 'city') and addr.city:
+                    addr_parts.append(addr.city)
+                if hasattr(addr, 'state') and addr.state:
+                    addr_parts.append(addr.state)
+                if addr_parts:
+                    lines.append("")
+                    lines.append(f"MANAGER: {mgr.name}")
+                    lines.append(f"  Location: {', '.join(addr_parts)}")
+        except Exception:
+            pass
+
+        # Signer
+        try:
+            if self.primary_form_information and self.primary_form_information.signature:
+                sig = self.primary_form_information.signature
+                if sig.name:
+                    lines.append("")
+                    lines.append("SIGNER:")
+                    lines.append(f"  Name: {sig.name}")
+                    if sig.title:
+                        lines.append(f"  Title: {sig.title}")
+        except Exception:
+            pass
+
+        # Other managers
+        try:
+            others = self.other_managers
+            if others:
+                lines.append("")
+                lines.append(f"OTHER MANAGERS: {len(others)}")
+                for om in others[:5]:
+                    lines.append(f"  {om.name} (CIK: {om.cik})")
+        except Exception:
+            pass
+
+        return "\n".join(lines)
 
     def __rich__(self):
         from edgar.thirteenf.rendering import render_rich

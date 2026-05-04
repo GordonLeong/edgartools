@@ -7,6 +7,546 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.30.2] - 2026-04-29
+
+### Fixed
+
+- **`get_filings(filing_date=(start, end))` crashed with TypeError** — `Entity.get_filings` declared `filing_date: Optional[Union[str, Tuple[str, str]]]` but the underlying parser only handled the colon-separated string form. The tuple form crashed every CIK with `TypeError: strptime() argument 1 must be str, not tuple` before any HTTP request. `extract_dates` now accepts both `(start, end)` tuples and lists, with `None` in either slot meaning "open" (matching the existing `"start:"` / `":end"` string-form semantics). ([#794](https://github.com/dgunning/edgartools/issues/794))
+
+- **Duplicate revenue rows when `RevenuesAbstract` is an additional virtual-tree root** — In ~35% of companies whose learned virtual trees contain `RevenuesAbstract` as an additional root alongside `IncomeStatementAbstract`, the rendered income statement showed Revenue twice — once promoted under `IncomeStatementAbstract`, once again as a child of the second root. The duplicate-root guard previously checked only top-level concepts; it now walks the tree recursively via `_collect_concepts` and prunes duplicate subtrees, preserving abstract containers only when they still hold unique descendants. ([#789](https://github.com/dgunning/edgartools/issues/789), PR [#790](https://github.com/dgunning/edgartools/pull/790) by @ghedo44)
+
+- **Orphan section re-introduced Revenue under "Additional Financial Items"** — As a follow-up to the #789 fix, the orphan dedup at the income-statement assembly layer was matching by display label only (`existing_labels`). When the canonical promotion produced an item with label "Total Revenue" while the orphan candidate fact carried the raw label "Revenue", the dedup missed the match and re-added Revenue under `AdditionalItems`. `_collect_labels` now tracks both labels and concepts so the orphan check `(label or concept) in existing_labels` matches by either form.
+
+## [5.30.1] - 2026-04-29
+
+### Fixed
+
+- **TTM income statement values labeled with wrong fiscal year for interim quarters** — When SEC re-filed comparative facts in next year's 10-Q (e.g., AGNC's Q1 2024 fact re-tagged with fiscal_year=2025 in a 2025 10-Q), `_deduplicate_by_period_end` kept the latest filing's version, and the TTM trend builder labeled the window with that comparative-shifted fiscal year. The result was duplicate column labels ("Q3 2025" appearing twice) that collided in the rendering layer's dict-keyed mapping, causing `Company('AGNC').income_statement(periods=12, period='ttm')` to display Q3 2024's TTM value under the "Q3 2025" column. The TTM calculator now derives the label fiscal year from `period_end + FYE` instead of the (potentially comparative-tagged) `as_of_fact.fiscal_year`. ([#793](https://github.com/dgunning/edgartools/issues/793))
+
+- **Quarterly facts dropped for non-calendar FYE companies** — Fixed regression introduced in 5.30.0 where the schedule-fact filter from #781 incorrectly rejected Q1/Q2/Q3 facts for companies with non-calendar fiscal year ends (ADSK, WMT, NVDA, CSCO, MSFT). `Company('ADSK').income_statement(periods=4, annual=False)` returned only Q4 across years instead of Q1–Q4 of the most recent fiscal year. The fiscal-year/period-end validator is now FYE-aware. ([#779](https://github.com/dgunning/edgartools/issues/779))
+
+- **`facts.time_series()` returned indistinguishable rows for overlapping periods** — When a company reported the same concept in both quarterly and YTD form (e.g., AGNC's `NetIncomeLoss` for `period_end=2025-06-30` had a 3-month Q2 row and a 6-month H1 YTD row), `time_series()` returned both with identical `period_end / fiscal_period / fiscal_year`, leaving users no way to tell them apart. Output now includes `period_start` and a derived `duration_days` column. ([#792](https://github.com/dgunning/edgartools/issues/792))
+
+- **`download_submissions` not importable from `edgar.storage`** — Error messages in `edgar/reference/company_dataset.py` instructed users to run `from edgar.storage import download_submissions`, but the function was defined in `edgar/storage/_local.py` without being added to that module's `__all__`, so the star-import in `edgar/storage/__init__.py` did not re-export it. The advertised import path now works. ([#791](https://github.com/dgunning/edgartools/issues/791))
+
+### Added
+
+- **8-K item filtering in `search_filings()`** — `search_filings()` now accepts an `items` parameter that is forwarded server-side to EFTS, enabling structured Item-based queries without falling back to client-side filtering (which previously lost the long tail to pagination caps). The `query` parameter is now optional when `items` is provided, supporting pure-structured lookups such as `search_filings(forms="8-K", items="1.05", start_date="2023-12-01", end_date="2024-12-31")` for cybersecurity disclosures.
+
+### Changed
+
+- **`GrepResult` repr/str unified via rich panel** — `GrepResult.__repr__` now renders the same Rich Panel as `__repr_html__`, replacing the old compact `"GrepResult('pattern', N matches)"` summary. `__str__` has been removed; calling `str(result)` falls back to `__repr__`. Callers that want the prior plain-text dump should call `result.to_context()` explicitly.
+
+## [5.30.0] - 2026-04-15
+
+### Added
+
+- **Proxy season analysis** — New `ProxySeason` and `ProxyContest` classes for grouping proxy filings by season and detecting contested elections. Market-wide discovery via `proxy_contests()` ([#773](https://github.com/dgunning/edgartools/issues/773))
+
+- **Proxy HTML data extractors** — Extract structured data from DEF 14A proxy statements:
+  - Summary Compensation Table (SCT) with executive pay details
+  - CEO pay ratio with footnote cross-validation
+  - Voting proposals with vote requirements and recommendations
+  - Beneficial ownership tables
+  - Director compensation tables
+  - Audit fees by category
+
+- **Full-text search enhancements** — Enriched EFTS search with relevance scores, aggregations, filtering, and pagination. New `.grep()` method for universal content search across filings
+
+### Fixed
+
+- **Fiscal year labels for non-calendar FYE companies** — Statement period labels for companies with early fiscal year ends (Jan–Mar) now use the industry-standard convention, matching the SEC, Bloomberg, and company earnings releases. NVIDIA Q3 ending Oct 2025 is now labeled "Q3 2026" (FY2026), not "Q3 2025" ([#779](https://github.com/dgunning/edgartools/issues/779))
+
+- **Empty statements from forward-looking schedule data** — Companies like CLSK with XBRL-tagged footnote disclosures (expected amortization schedules) no longer produce phantom future periods that displace real quarterly data ([#781](https://github.com/dgunning/edgartools/issues/781))
+
+- **Missing XBRL instance from SEC** — Fetch XBRL instance directly from SEC when local feed file lacks it ([#778](https://github.com/dgunning/edgartools/issues/778))
+
+- **XBRL parsing for bytes content** — Hardened XBRL parser to handle bytes content and missing entity info without errors
+
+- **Concept panel display in `viewer.search()`** — Restored section separator newlines inside Concept panels that were incorrectly removed in v5.29.0 ([#776](https://github.com/dgunning/edgartools/issues/776))
+
+### Performance
+
+- **Replace BeautifulSoup with lxml for proxy HTML** — Faster and more memory-efficient HTML parsing for proxy statement extraction
+
+## [5.29.0] - 2026-04-12
+
+### Added
+
+- **`exact` parameter for `FactQuery.by_date_range()`** — New `exact=True` option matches facts with period dates exactly equal to the specified date, instead of the default `<=`/`>=` range behavior ([#767](https://github.com/dgunning/edgartools/issues/767))
+
+- **`Company.reit_subtype` property** — New property distinguishes equity REITs from mortgage REITs by checking for mortgage-related XBRL concepts in the company's filings
+
+- **Filing agent fingerprinting** — Detect the filing agent (Donnelley, EDGAR Online, Workiva, Toppan Merrill) from HTML structure patterns, enabling agent-aware document parsing
+
+- **Agent-aware TOC parsing** — Table of contents section detection now uses agent-specific parsing strategies for the top 4 filing agents, improving section extraction accuracy
+
+- **TOC section detection evaluation suite** — Evaluation harness for measuring TOC section detection quality across a corpus of filings
+
+### Fixed
+
+- **Extra newlines in `viewer.search()` output** — Removed spurious blank lines between sections in `Concept` panel display ([#768](https://github.com/dgunning/edgartools/issues/768))
+
+- **`business_category` misclassifications** — Corrected 4 classification patterns for more accurate company categorization ([#774](https://github.com/dgunning/edgartools/issues/774))
+
+- **YTD periods missing `fiscal_period` classification** — Year-to-date periods in XBRL facts now receive proper fiscal period labels ([#771](https://github.com/dgunning/edgartools/issues/771))
+
+- **61 cash flow `gaap_mappings` defaulting to section totals** — Corrected mappings that incorrectly pointed to section-level totals instead of specific line items
+
+- **Duplicate facts in XBRL DataFrame** — Deduplicate identical facts in `facts.to_dataframe()` output ([#769](https://github.com/dgunning/edgartools/issues/769))
+
+- **`period_of_report` triggering network calls** — Resolved unintended network requests when accessing `period_of_report` for local storage users
+
+### Performance
+
+- **Cache parsed lxml tree** — Eliminate redundant HTML parsing by caching the parsed lxml tree across document operations
+
+## [5.28.5] - 2026-04-08
+
+### Fixed
+
+- **HTML markup in disclosure DataFrame output** — `to_dataframe()` now strips HTML from XBRL TextBlock facts in disclosure/notes statements, producing clean plain text instead of raw markup. Uses the existing `_is_html`/`html_to_text` utilities. Includes regression test ([#762](https://github.com/dgunning/edgartools/issues/762))
+
+- **Missing DividendsEquity standard concept for equity statement** — Added `DividendsEquity` to the equity vocabulary (`gaap_mappings.json`, `section_membership.json`, `display_names.json`), fixing GOOGL's `AdjustmentsToAdditionalPaidInCapitalDividendsInExcessOfRetainedEarnings` being unmapped on the equity statement ([#763](https://github.com/dgunning/edgartools/issues/763))
+
+- **Entity rich display alignment** — `Entity` rich display now follows the same design language as `Company`, ensuring consistent visual presentation
+
+### Documentation
+
+- **Equity statement data layers guide** — New guide explaining why face statement totals, component breakdowns, and disclosure note values differ across XBRL data layers
+
+## [5.28.4] - 2026-04-05
+
+### Fixed
+
+- **Q/YTD/FY period labels missing from equity and comprehensive income** — Equity and comprehensive income statements now receive the same Q1/Q2/Q3/Q4/YTD/FY column labels applied to income and cash flow statements ([#759](https://github.com/dgunning/edgartools/issues/759))
+
+- **Incorrect StockRepurchasesEquity mapping** — Removed erroneous `StockRepurchasesEquity` standard concept mapping for tax withholding on vested shares, which caused misclassification on equity statements ([#760](https://github.com/dgunning/edgartools/issues/760))
+
+- **Schedule 13D/G total\_shares and total\_percent overcounting** — Changed aggregation from `sum()` to `max()` to correctly represent reported totals rather than double-counting across rows
+
+- **13F-HR TXT parser for pre-2013 filings** — Rewrote the 13F-HR TXT parser to use column-position extraction, added regex fallback and decimal handling, achieving ~93% coverage of pre-2013 filings ([#476](https://github.com/dgunning/edgartools/issues/476))
+
+- **Standard concept name misspellings** — Corrected misspellings in standard concept names ([#758](https://github.com/dgunning/edgartools/issues/758))
+
+### Documentation
+
+- Document pre-2013 TXT format support and 93% coverage in 13F guides
+
+## [5.28.3] - 2026-04-03
+
+### Fixed
+
+- **Wrong quarter labels for non-calendar fiscal years** — Quarter labels in financial statement columns now use the company's fiscal year end month instead of hardcoded calendar months. Affects companies like AAPL (Sep FY), WMT (Jan FY), NKE (May FY) ([#752](https://github.com/dgunning/edgartools/issues/752))
+
+- **Period-type suffixes always present on DataFrame columns** — `to_dataframe()` now always includes period-type suffixes (Q1/Q2/Q3/Q4/YTD/FY) on all duration columns, not just when end dates collide ([#753](https://github.com/dgunning/edgartools/issues/753))
+
+- **Incorrect Q4 fiscal year label for Jan-Mar FYE companies** — Companies with fiscal years ending in January through March (e.g., WMT) now receive the correct Q4/FY label rather than a label belonging to the following calendar year ([#754](https://github.com/dgunning/edgartools/issues/754))
+
+- **Capex extraction broken by label regex** — Capital expenditure extraction now uses XBRL concept names (`PaymentsToAcquirePropertyPlantAndEquipment`, etc.) instead of fragile label regex matching, making it robust across filings with varied label text ([#756](https://github.com/dgunning/edgartools/issues/756))
+
+## [5.28.2] - 2026-04-02
+
+### Added
+
+- **FDUS investment parser** — Add support for FDUS BDC investment parsing ([#747](https://github.com/dgunning/edgartools/issues/747))
+
+### Fixed
+
+- **business_category misclassifications** — Fix ETFs, SPACs, commodity trusts, and BDCs being misclassified. Adds SPAC name pattern detection, "ETF" name check for crypto/commodity ETFs, SIC 6200s fund/trust heuristic, removes over-broad "CAPITAL CORP" BDC name pattern, and uses authoritative 814- file number for BDC detection ([#561](https://github.com/dgunning/edgartools/issues/561))
+
+- **to_dataframe() missing columns** — `to_dataframe()` now includes both quarterly and YTD columns when a filing contains both, instead of silently dropping one ([#743](https://github.com/dgunning/edgartools/issues/743))
+
+- **13F values not normalized** — Normalize 13F holdings values to dollars across all periods ([#749](https://github.com/dgunning/edgartools/issues/749))
+
+- **obj() routing for Schedule 13D/G** — `obj()` now correctly routes SC 13D/G forms to Schedule13D/13G parsers ([#748](https://github.com/dgunning/edgartools/issues/748))
+
+- **find_ticker() wrong result** — Fix wrong company ticker returned for CIK 1506307 ([#745](https://github.com/dgunning/edgartools/issues/745))
+
+- **download_filings in Jupyter** — Support `download_filings` in Jupyter notebook environments ([#744](https://github.com/dgunning/edgartools/issues/744))
+
+- **reverse_name** — Replace with improved implementation for more accurate name reversal
+
+- **Punctuation normalization** — Fix handling of digits and percent signs in text extraction
+
+### Documentation
+
+- Improve SEC Viewer guide with images, ConceptGraph section, and nav entry
+
+## [5.28.1] - 2026-03-31
+
+### Fixed
+
+- **TOC section detection for split-link filings** — Filings where TOC item labels and descriptive titles link to different anchors (e.g., TSLA 10-K) now validate anchor targets against expected section headings, picking the correct anchor ([#742](https://github.com/dgunning/edgartools/issues/742))
+
+- **Non-accrual extraction false positives** — Footnotes that explicitly deny non-accrual status (e.g., "there were no investments on non-accrual status") are no longer treated as positive matches. Replaced naive substring matching with two-stage negation-then-affirmation classification. Scored 50/50 on synthetic variations
+
+- **Non-accrual period resolution** — `extract_nonaccrual()` now uses `filing.period_of_report` as anchor for period selection instead of picking the max instant date, which could resolve to filing dates or DEI dates instead of balance sheet dates. ARCC now correctly resolves to 2025-12-31
+
+## [5.28.0] - 2026-03-30
+
+### Added
+
+- **FilingViewer — SEC Interactive Data Viewer** — New `FilingViewer` class provides access to the SEC's interactive XBRL viewer for any filing. Parses MetaLinks.json for concept-level metadata, extracts R*.htm viewer reports, and exposes structured period headers, numeric values, and scaling information
+
+- **ConceptGraph — navigable XBRL knowledge graph** — New `ConceptGraph` class builds a traversable graph of XBRL concepts and their relationships, enabling structured navigation across the taxonomy hierarchy
+
+- **BDC non-accrual extraction** — New `extract_nonaccrual()` function in `edgar.bdc.nonaccrual` extracts non-accrual investment data from BDC XBRL filings using three layered strategies: XBRL footnotes (investment-level detail), custom XBRL concepts (rate only), and standard us-gaap aggregate fallback
+
+- **to_markdown() for LLM drill-down** — Notes, disclosures, and financial drill-down objects now expose `to_markdown()` for LLM-optimized output ([#732](https://github.com/dgunning/edgartools/issues/732))
+
+- **compare_context() for LLM-based validation** — New method on XBRL objects for cross-validating parsed values against SEC viewer output using an LLM judge
+
+- **Cross-validation bridge between SEC Viewer and XBRL parser** — `FilingViewer` and the XBRL parser can now be reconciled programmatically, with `to_dataframe()` and diagnostic outputs for systematic validation
+
+- **MetaLinks.json parser** — Full parser for the SEC XBRL viewer's MetaLinks.json metadata file, exposing concept-level role, label, and calculation arc data
+
+### Fixed
+
+- **Abbreviations and inline spacing preserved in iXBRL text extraction** — Text extraction from iXBRL documents no longer splits abbreviations like `U.S.` into `U. S.` or `D.C.` into `D. C.`. Affects all inline XBRL filings ([#734](https://github.com/dgunning/edgartools/issues/734))
+
+- **TOC part metadata parsing** — Table of contents part metadata is now correctly extracted ([#737](https://github.com/dgunning/edgartools/issues/737)) — contributed by external PR
+
+- **Ruff code quality: 533 issues resolved** — Full codebase pass fixing lint, f-string, and style issues including a `LinkBlock.get_text()` f-string bug ([#740](https://github.com/dgunning/edgartools/issues/740))
+
+### Documentation
+
+- New SEC Viewer guide with full API reference for `FilingViewer` and `ConceptGraph`
+- BDC guide updated with non-accrual analysis section and examples
+- AI integration docs updated with expanded `to_context()` and `to_markdown()` coverage
+
+## [5.27.0] - 2026-03-28
+
+### Added
+
+- **Dedicated 6-K data object** — New `SixK` class replaces the `CurrentReport` alias for Form 6-K (Report of Foreign Private Issuer). Extracts cover page metadata (commission file number, report month, annual report form, content description), provides exhibit access, press release filtering, and IFRS financials when present. Includes `to_context()` with cover page text at `full` detail level
+
+- **S-1/F-1 registration statement data object** — New `RegistrationS1` class for S-1 and F-1 registration statements with cover page extraction, prospectus section access, and amendment support
+
+- **DRS draft registration statement data object** — New `DraftRegistrationStatement` class for confidential draft registration statements (DRS/DRS-A)
+
+- **Generic XML filing data object** — New `XmlFiling` class for XML+XSLT SEC forms (X-17A-5, TA-1, TA-2, SBSE, ATS-N-C, CFPORTAL, etc.) with automatic XSLT rendering
+
+- **24F-2NT fund fee notice data object** — New `FundFeeNotice` class for annual notices of securities sold by registered investment companies
+
+- **497K fund summary prospectus data object** — New `Prospectus497K` class for 497K fund summary prospectus filings
+
+- **F-1/F-1A foreign registration support** — `RegistrationS1` now accepts F-1 and F-1/A forms for foreign private issuer IPO registrations
+
+- **F-3 foreign shelf registration support** — `RegistrationS3` now accepts F-3, F-3/A, and F-3ASR forms
+
+- **EightK improvements** — New `content_type` property classifying 8-K filings (earnings, cybersecurity, restructuring, etc.), `is_amendment` property, `get_exhibit()` and `get_exhibits()` methods, and context-aware `to_context()` that adjusts available actions based on content type
+
+### Fixed
+
+- **8-K section boundary captures full body text** — HTMLParser section detection now correctly extends section boundaries past table-wrapped item headings to include all body paragraphs until the next section ([#733](https://github.com/dgunning/edgartools/issues/733))
+
+- **gaap_mappings: PaymentsToDevelopSoftware and PaymentsForSoftware** — Both were incorrectly mapped to `NetCashFromInvestingActivities` (section total) instead of `PurchaseOfIntangibleAssets` (component line item) ([#739](https://github.com/dgunning/edgartools/issues/739))
+
+- **Infinite recursion in html() for XML-primary filings** — `html()` no longer recurses when the primary document of S-1/S-3 filings is XML rather than HTML
+
+- **MunicipalAdvisorForm assert narrowed** — Assert restricted to MA-I only; MA form now routes to `XmlFiling`
+
+### Documentation
+
+- New data object guides: Form 6-K, S-1, DRS, EFFECT, 24F-2NT, XML filings
+- F-3 foreign shelf registration forms added to S-3 guide
+- MCP docs rewritten with real examples and corrected setup instructions
+
+## [5.26.1] - 2026-03-26
+
+### Fixed
+
+- **MCP tool definitions: `outputSchema` removed** — `outputSchema` was included in all MCP tool definitions, which is not part of the MCP protocol spec. Claude Desktop rejected every tool call, blocking all MCP usage entirely. Removing the field restores full MCP functionality ([#735](https://github.com/dgunning/edgartools/issues/735))
+
+- **`edgar_notes` next-steps reference** — `edgar_notes` referenced a non-existent tool name in its `next_steps` guidance; corrected to a valid tool
+
+- **`edgar_screen` state filter silently dropped** — State filter was silently discarded on queries that specified only an exchange (no SIC code), causing state-filtered screening to return unfiltered results
+
+- **`edgar_compare` growth metrics broken** — Growth metric calculation failed because `time_series` fetched insufficient periods; fetch count increased to ensure enough data points are available
+
+### Improved
+
+- **MCP documentation reorganised** — `ai-integration.md` split into five focused pages (`ai/index.md`, `ai/mcp-setup.md`, `ai/mcp-tools.md`, `ai/mcp-workflows.md`, `ai/skills.md`) for easier navigation. Parameter defaults and required-field annotations corrected across all pages
+
+## [5.26.0] - 2026-03-25
+
+### Added
+
+- **CORRESP/UPLOAD correspondence support** — New `Correspondence` and `CorrespondenceThread` classes parse SEC correspondence filings with automatic classification (company_response, acceleration_request, sec_comment, review_complete, no_review) and metadata extraction (file number, referenced form, fiscal year). `Filing.correspondence()` works on any filing type to find related SEC review threads via file number
+
+- **Point-in-Time mode for EntityFacts** — `EntityFacts.to_dataframe()` now accepts a `pit_mode` parameter that includes `filing_date` and `form_type` columns, enabling lookahead-bias-free backtesting by filtering on `filing_date <= as_of_date` ([#697](https://github.com/dgunning/edgartools/issues/697))
+
+- **S-3 shelf registration data object** — New `RegistrationS3` class with fee table extraction from EX-FILING FEES exhibits (Exhibit 107) supporting 5 HTML format variations, `ShelfLifecycle` with shelf capacity and offering capacity properties, prospectus section access with 16 section patterns, and auto-shelf detection for well-known seasoned issuers ([#728](https://github.com/dgunning/edgartools/issues/728))
+
+- **TTM unification on EntityFacts** — Unified TTM access on `EntityFacts` with streamlined `Company` delegation. TTM-ready facts are cached for performance. Quarter labels now use fiscal year (PR [#721](https://github.com/dgunning/edgartools/pull/721), ghedo44)
+
+### Fixed
+
+- **TOC named-anchor targets** — Table-of-contents anchor matching centralized and now correctly resolves named-anchor targets ([#727](https://github.com/dgunning/edgartools/pull/727))
+
+- **Revenue in income statement dedup** — Revenue now included in the promoted income statement deduplication set
+
+- **Shares concepts preserved in statements** — Shares-denominated concepts (EPS, shares outstanding) are no longer dropped from income statements during unit filtering (PR [#725](https://github.com/dgunning/edgartools/pull/725), ghedo44)
+
+- **TypeError in `_get_statement_concepts`** — Fixed crash when statement type is `None` by using `or ''` fallback instead of relying on `dict.get()` default
+
+- **Unit filter documentation** — Docstrings updated to reflect native-unit filtering behavior
+
+### Improved
+
+- **EntityFacts memory usage reduced 27%** — String interning deduplicates high-repetition fields (taxonomy, unit, fiscal_period, form_type, concept) from ~99K objects to ~1.6K. Per-concept work hoisted out of per-fact loop, dimensions default changed to `None`, period index key caching added. Measured on AAPL: 20.5 MB → 15.0 MB
+
+### Data
+
+- Bundled ticker and CUSIP reference data refreshed (10,652→10,769 tickers, deduplicated CUSIPs)
+
+## [5.25.1] - 2026-03-19
+
+### Added
+
+- **BDC health metrics** — `PortfolioInvestments` now exposes `nonaccrual_fair_value`, `non_accrual_rate`, `pik_investments`, `pik_fair_value`, and `pik_exposure` properties. Non-accrual data is extracted from the entity-level XBRL concept `us-gaap:FairValueOptionLoansHeldAsAssetsAggregateAmountInNonaccrualStatus`. Rich display shows color-coded non-accrual and PIK summary lines
+
+### Fixed
+
+- **Pickle serialization of XBRL objects** — Replaced `weakref` with strong references in `Note`, `StatementLineItem`, `FilingSummary`, and `WeakCache`. Weak references caused `pickle.dumps()` to fail on these objects, breaking caching and multiprocessing workflows
+
+## [5.25.0] - 2026-03-18
+
+### Added
+
+- **Statement-to-note drill-down** — Navigate from any financial statement line item to the note that explains it. `balance_sheet['Cash and cash equivalents'].note` returns the related `Note` object via a lazy-built reverse index that maps XBRL concepts to notes — the same mechanism the SEC's own EDGAR viewer uses
+
+- **`Note` and `Notes` classes** — First-class objects for financial statement notes, built from FilingSummary.xml hierarchy. Access via `tenk.notes` or `tenq.notes`. Browse by number (`notes[5]`), title (`notes['Debt']`), or fuzzy search (`notes.search('revenue')`). Each note exposes `.tables`, `.policies`, `.details`, `.text`, `.html`, `.expands` (which statement lines it explains), and `.to_context()` for AI consumption
+
+- **`StatementLineItem`** — Lightweight wrapper returned by `Statement.__getitem__` with `.label`, `.concept`, `.note` (most relevant note), `.notes` (all related), and `.values`. Uses `__slots__` for minimal memory footprint
+
+- **`Statement.search()`** — Fuzzy search for statement line items with ranked results (exact > startswith > word match > substring). Complements the exact-match `__getitem__`. Consistent with the `Notes.search()` pattern
+
+- **`Statement.report` property** — Links to the FilingSummary `Report` for HTML table access. Enables `note.tables[0].report.to_dataframe()` for HTML-extracted DataFrames alongside the XBRL path
+
+- **`RenderedStatement.__getitem__`** — Look up rows by exact label (case-insensitive) on rendered statements
+
+- **`edgar_notes` MCP tool** — New tool for AI agents to drill into notes and disclosures by company and topic. Returns structured note content, related statement lines, and child table data. Surfaces the detail behind financial statement numbers that no other SEC MCP server exposes
+
+- **`CompanyReport.notes`** — Cached property on TenK/TenQ providing hierarchical notes access from report objects
+
+- **`TenK.to_context(focus=...)` / `TenQ.to_context(focus=...)`** — Focus mode generates cross-cutting context for specific topics (e.g., `focus='debt'`), pulling statement line items, note content, and policies together
+
+- **Role type definitions from schema** — XBRL parser now extracts human-readable role definitions from taxonomy schemas, improving statement and note titles
+
+### Improved
+
+- **XBRL memory optimizations** — Label role URI strings are now interned via `sys.intern()`, eliminating ~10,000 duplicate URL string allocations per filing. `comparison_data` removed from `RenderedStatement.metadata` (was stored but never read back). Duplicate `_collect_note_concepts` tree walks eliminated in `expands_statements`
+
+- **`Statement.__getitem__` is now exact-match only** — Previously used substring fallback that could silently return wrong rows for ambiguous queries like `stmt['Total']`. Now returns the correct match or `None`. Use `stmt.search()` for fuzzy lookups
+
+### Fixed
+
+- **Drill-down required notes pre-load** — Accessing `stmt['Debt'].note` before `tenk.notes` produced empty results because notes were built without FilingSummary. Now the XBRL object stores its FilingSummary during `from_filing()` so the lazy notes builder always gets the full hierarchy
+
+## [5.23.3] - 2026-03-15
+
+### Fixed
+
+- **Duplicate rows from XBRL concept renames** — When companies switch XBRL concepts between years (e.g. AAPL switching from `aapl:` company extension to `us-gaap` concepts), Comprehensive Income and other statements showed duplicate rows with complementary NaN values. A new `_merge_complementary_rows()` pass detects adjacent same-label rows with non-overlapping period values and merges them into a single row
+
+- **EntityFacts duplicate labels from orphan concept renames** — Balance sheet from `get_facts()` showed duplicate rows (e.g. Accounts Receivable, Inventory, Accounts Payable) when a concept rename caused the same data to appear in both the main tree and the Additional Items section. Orphan facts whose label already exists in the main tree are now skipped
+
+- **EarningsRelease scale detection** — Scale was incorrectly detected as "billions" for companies like GOOG because `Scale.detect()` matched bare words like "billion" in narrative text. Now uses parenthetical patterns `(in millions)` / `(dollars in millions)` which appear near financial tables ([#693](https://github.com/dgunning/edgartools/issues/693))
+
+- **EarningsRelease cash flow misclassification** — GOOG EPS showed $0.00 because a 34-row cash flow table was misclassified as income statement due to "net income" and "accrued revenue share" keywords. Added strong cash flow keywords and expanded row scan range from 20 to 40 rows ([#700](https://github.com/dgunning/edgartools/issues/700))
+
+- **IdentityNotSetException swallowed by SGML fallback** — Missing EDGAR identity now raises a clear `IdentityNotSetException` instead of silently falling back to the homepage index ([#707](https://github.com/dgunning/edgartools/issues/707))
+
+- **ComprehensiveIncome Resolver Fallback for Historical Filings** — `comprehensive_income()` now returns a `Statement` for older filings (pre-2015) that embed OCI data within the equity rollforward statement. The resolver falls back to the equity statement when it contains CI concepts. Affected companies include IBM, GE, Ford, and TSLA for 10-K filings from 2009-2013 ([#706](https://github.com/dgunning/edgartools/issues/706))
+
+- **14 Jupyter notebooks broken by recent API changes** — Updated all notebooks to use current API patterns ([#708](https://github.com/dgunning/edgartools/issues/708))
+
+### Added
+
+- **Foreign filer support in `get_financials()`** — Falls back to 20-F (foreign private issuers) and 40-F (Canadian filers) when no 10-K exists. `get_quarterly_financials()` falls back to 6-K. Companies like AZN, TM, TD now return financials
+
+- **`clear_company_facts_cache()`** — New public function to free memory from previously loaded EntityFacts objects in long-running processes
+
+### Improved
+
+- **Company class memory footprint** — Company facts cache reduced to 1 entry (~25MB ceiling), `FinancialFact` uses `slots=True`, SIC/ticker resolution deferred to statement-build time to avoid unnecessary submissions downloads ([#705](https://github.com/dgunning/edgartools/issues/705))
+
+- **EarningsRelease exhibit selection** — `from_filing()` now tries multiple EX-99.* exhibits when the first one lacks an income statement, instead of always using EX-99.1
+
+- **`Company.facts` cached** — Changed from `@property` to `@cached_property` to prevent redundant `get_facts()` calls
+
+## [5.23.0] - 2026-03-11
+
+### Added
+
+- **424B Prospectus Parser** — New multi-phase parser for 424B prospectus filings (424B1 through 424B8). Extracts cover page data, classifies offering types (firm commitment, ATM, best efforts, PIPE resale, structured notes, debt offerings, and more), and parses underwriting terms, selling stockholder tables, and structured note payoff details. Access via `filing.obj()` on any 424B filing ([9975dd67](https://github.com/dgunning/edgartools/commit/9975dd67))
+
+- **Deal Object** — `Deal` provides a normalized summary of a 424B prospectus including issuer, security type, pricing, aggregate proceeds, underwriters, and key dates. Condenses complex prospectus data into a single structured object ([1035846a](https://github.com/dgunning/edgartools/commit/1035846a))
+
+- **ShelfLifecycle Object** — `ShelfLifecycle` traces a shelf registration (S-3) through its full lifecycle: original filing, effectiveness date, takedowns (424B filings), amendments, and expiration. Computes review period, cadence metrics, and remaining capacity ([0057e00d](https://github.com/dgunning/edgartools/commit/0057e00d))
+
+- **XBRL Filing Fees Extraction** — 424B filings that embed XBRL fee exhibits are now parsed, extracting fee tables, total offering amounts, and registration fees ([64abd16d](https://github.com/dgunning/edgartools/commit/64abd16d))
+
+- **Selling Stockholders** — Extracts selling stockholder tables with numeric properties (`shares_before`, `shares_offered`, `shares_after`, `pct_before`, `pct_after`), warrant support, and `to_dataframe()` output ([3987131d](https://github.com/dgunning/edgartools/commit/3987131d))
+
+- **to_context() for AI Workflows** — `Prospectus424B.to_context()` and `ShelfLifecycle.to_context()` produce condensed text summaries suitable for LLM context windows ([f3b6d283](https://github.com/dgunning/edgartools/commit/f3b6d283))
+
+### Fixed
+
+- **XBRLS Detailed View Overwriting Totals** — Dimensional segment rows in stitched statements were overwriting parent total values (e.g., Goodwill 7,970M replaced by segment 650M). Stitching now skips `is_dimension` rows so totals are preserved ([#687](https://github.com/dgunning/edgartools/issues/687)) ([be898b30](https://github.com/dgunning/edgartools/commit/be898b30))
+
+- **Filer Type Classification** — ~955 companies lack `state_of_incorporation` data, causing `filer_type` to return `None`. Now infers filer type from recent filing forms: 40-F → Canadian, 20-F/6-K → Foreign, 10-K/10-Q → Domestic. Also classifies ADR deposits, UITs, investment company funds, and crowdfunding issuers ([#562](https://github.com/dgunning/edgartools/issues/562)) ([7e827bc4](https://github.com/dgunning/edgartools/commit/7e827bc4), [be898b30](https://github.com/dgunning/edgartools/commit/be898b30))
+
+- **Small Business Form Hyphens** — Corrected form names `10KSB` → `10-KSB`, `10QSB` → `10-QSB` to match SEC EDGAR data format ([eeea01d4](https://github.com/dgunning/edgartools/commit/eeea01d4))
+
+- **Document Stitching Dimension Skip** — Stitching dimension skip now applies unconditionally since the stitcher uses concept as dict key and cannot yet differentiate segments from totals when both share the same concept ([eeea01d4](https://github.com/dgunning/edgartools/commit/eeea01d4))
+
+- **424B Parser Bug Fixes** — 17 bugs fixed across two review passes covering cover page extraction, table classification, offering type detection (424B4 classification improved from 0% → 100%), and selling stockholder table detection ([73f594cf](https://github.com/dgunning/edgartools/commit/73f594cf), [1180e8d0](https://github.com/dgunning/edgartools/commit/1180e8d0), [962766bf](https://github.com/dgunning/edgartools/commit/962766bf), [58dc4afb](https://github.com/dgunning/edgartools/commit/58dc4afb))
+
+### Performance
+
+- **424B HTML Parsing** — Parse HTML once per 424B prospectus instead of 4 times, reducing parse time significantly ([3eb81c12](https://github.com/dgunning/edgartools/commit/3eb81c12))
+
+- **ShelfLifecycle Speed** — Lifecycle construction now uses SGML `file_number` and skips full filing loads, making lifecycle queries substantially faster ([466a80bb](https://github.com/dgunning/edgartools/commit/466a80bb))
+
+### Changed
+
+- **CI Test Matrix** — Reduced test matrix from 4 Python versions to 3.10 and 3.13 only ([6d6674de](https://github.com/dgunning/edgartools/commit/6d6674de))
+
+- **Fast Test Suite Cleanup** — Moved 195 misclassified network tests out of the fast test suite and fixed `xbrl_balance_weight` network tests leaking into fast tests ([fb8a8974](https://github.com/dgunning/edgartools/commit/fb8a8974), [e31e8d38](https://github.com/dgunning/edgartools/commit/e31e8d38))
+
+## [5.22.0] - 2026-03-08
+
+### Added
+
+- **Data-Driven Concept Mappings** — Replaced hand-maintained `gaap_mappings.json` (2,077 tags, 96 concepts) with a data-driven `concept_mappings.json` built from analysis of 32,240 real SEC filings (2,770 tags, 234 concepts). Each entry carries embedded metadata: display name, section, is_total flag, confidence, company count, temporal consistency, and industry overrides ([bd73e838](https://github.com/dgunning/edgartools/commit/bd73e838))
+
+- **Industry-Aware XBRL Standardization** — Industry overrides (769 entries mapped across Fama-French 48 industries) automatically resolve 42 ambiguous tags and correct 725 is_total signals per industry. SIC codes are now mapped to FF48 industry codes for automatic industry detection when parsing filings ([bd73e838](https://github.com/dgunning/edgartools/commit/bd73e838))
+
+- **150 IFRS Tag Mappings** — Added 150 `ifrs-full_` prefixed tag mappings for international filer standardization, improving coverage for 20-F filers. Verified on Novo Nordisk 20-F: 93% income statement, 78% balance sheet, 76% cash flow coverage ([d643805c](https://github.com/dgunning/edgartools/commit/d643805c))
+
+- **Standardization Integrated into Stitching** — Industry-aware standardization is now threaded through the multi-filing stitching system, giving consistent concept normalization across all historical filing periods ([48b1fa30](https://github.com/dgunning/edgartools/commit/48b1fa30))
+
+### Fixed
+
+- **XBRL Stitching: Same-Label Row Merging** — When companies switch XBRL concepts between fiscal years (e.g., `aapl:DerivativeInstrument` to `us-gaap:CashFlowHedge`), the presentation tree now merges duplicate rows with complementary period values using value-agreement as a safety guard ([#572](https://github.com/dgunning/edgartools/issues/572)) ([031d1042](https://github.com/dgunning/edgartools/commit/031d1042))
+
+- **XBRL Stitching: Concept Alias Merging** — Concept name variant detection now uses pairwise matching with two guards (substring containment + value agreement) to correctly coalesce aliased totals (e.g., Disney's `*ContinuingOperations` → plain variant) without incorrectly merging unrelated sub-items ([#642](https://github.com/dgunning/edgartools/issues/642)) ([fa4f457b](https://github.com/dgunning/edgartools/commit/fa4f457b))
+
+- **XBRL Stitching: Equivalent Standard Concepts** — Introduces `_EQUIVALENT_STANDARD_CONCEPTS` to unify rows where companies changed between economically identical concepts (e.g., `CashAndCashEquivalents` vs `CashAndMarketableSecurities`) that map to different standard concepts ([#610](https://github.com/dgunning/edgartools/issues/610)) ([aec58dca](https://github.com/dgunning/edgartools/commit/aec58dca))
+
+- **XBRL Stitching: Missing Statement Handling** — Stitching no longer aborts when a filing lacks the requested statement type (e.g., VALE 20-F filings without a cash flow presentation role). The period is now skipped gracefully ([#683](https://github.com/dgunning/edgartools/issues/683)) ([d799120a](https://github.com/dgunning/edgartools/commit/d799120a))
+
+- **Dimensional Total Synthesis** — When a concept has only dimensional facts (e.g., DIS `CostOfGoodsAndServicesSold` broken into Service + Product on ProductOrServiceAxis) with no non-dimensional total, the correct aggregate is now computed by summing the dimensional members ([#646](https://github.com/dgunning/edgartools/issues/646)) ([0ba5bc52](https://github.com/dgunning/edgartools/commit/0ba5bc52))
+
+- **IFRS Statement Misclassification** — IFRS filers like SNY had `income_statement()` and `comprehensive_income()` resolving to the same statement. Fixed by adding IFRS concept classification in Phase 1, removing ambiguous overlap, and adding P&L role pattern with IFRS scoring boost ([#673](https://github.com/dgunning/edgartools/issues/673)) ([a2fd8225](https://github.com/dgunning/edgartools/commit/a2fd8225))
+
+- **Preferred Sign Applied in to_dataframe()** — `Statement.to_dataframe()` now defaults to `presentation=True`, matching the sign conventions shown in Rich rendering. `StitchedStatement.to_dataframe()` also preserves and applies `preferred_sign`, including contra accounts like Treasury Stock on the balance sheet ([#669](https://github.com/dgunning/edgartools/issues/669)) ([2d795630](https://github.com/dgunning/edgartools/commit/2d795630))
+
+- **Document.to_markdown() Import Error** — Fixed incorrect import path `markdown_renderer` → `markdown` in `Document.to_markdown()` ([#684](https://github.com/dgunning/edgartools/issues/684)) ([b6107ef8](https://github.com/dgunning/edgartools/commit/b6107ef8))
+
+- **Document.to_json() AttributeError** — `Document.to_json()` no longer raises `AttributeError: 'str' object has no attribute 'to_dict'` when `xbrl_data` is stored as a dict. The parser now assigns the fact list directly ([#685](https://github.com/dgunning/edgartools/issues/685)) ([e8e6e695](https://github.com/dgunning/edgartools/commit/e8e6e695))
+
+- **Standardization Bug Fixes** — Resolved 5 correctness bugs: Coal/Mines SIC range overlap, incorrect ambiguity flag on override, O(n²) linear scan replaced with O(1) dict lookup, dual `ReverseIndex` singleton, and raw data mutation on `statement_type` field ([d681caec](https://github.com/dgunning/edgartools/commit/d681caec))
+
+- **Non-Numeric Value Comparison Guard** — `_merge_same_label_line_items` no longer crashes with `TypeError` when XBRL fact values are strings (e.g., Boeing, Carrier). The numeric tolerance check is now wrapped in a try/except ([03b8d4c6](https://github.com/dgunning/edgartools/commit/03b8d4c6))
+
+- **Regression Test Updates** — Updated 7 regression test files for current API: `financials.cashflow_statement()` method call, `Statement.role_or_type` attribute, `abs()` for preferred_sign-affected COGS assertions, and `xbrl_data` list format ([78ae478e](https://github.com/dgunning/edgartools/commit/78ae478e))
+
+## [5.21.1] - 2026-03-06
+
+### Fixed
+
+- **8-K Table Scale Detection** — The 8-K parser now detects table scale (e.g., "in thousands") from preceding paragraph nodes, not just the table header, producing correct financial values ([#633](https://github.com/dgunning/edgartools/issues/633)) ([9f920af3](https://github.com/dgunning/edgartools/commit/9f920af3))
+
+- **Local Storage Check in full_text_submission()** — `full_text_submission()` now checks local storage before downloading from SEC, avoiding unnecessary network calls when filings are already cached locally ([#681](https://github.com/dgunning/edgartools/issues/681)) ([0cdde2f3](https://github.com/dgunning/edgartools/commit/0cdde2f3))
+
+- **Dimensional Member Hierarchy in to_dataframe()** — Statement `to_dataframe()` now preserves the dimensional member hierarchy, maintaining the correct parent-child relationships for XBRL dimensions ([4f5797d1](https://github.com/dgunning/edgartools/commit/4f5797d1))
+
+### Docs
+
+- **get_fact() Examples Corrected** — Fixed `get_fact()` documentation examples to use valid XBRL concept names ([#618](https://github.com/dgunning/edgartools/issues/618)) ([d768a049](https://github.com/dgunning/edgartools/commit/d768a049))
+
+## [5.21.0] - 2026-03-05
+
+### Added
+
+- **MCP Streamable HTTP Transport** — The MCP server now supports remote deployment via Streamable HTTP transport in addition to stdio. Start with `edgartools-mcp --transport streamable-http --port 8000` for team servers, registry listings, and containerized deployments. Clients connect with a simple URL instead of launching a subprocess. stdio remains the default and is unchanged ([2aa48f71](https://github.com/dgunning/edgartools/commit/2aa48f71))
+
+- **edgar_proxy MCP Tool** — New tool for DEF 14A proxy statement data including executive compensation and pay-vs-performance ([2a39871b](https://github.com/dgunning/edgartools/commit/2a39871b))
+
+- **edgar_fund MCP Tool** — New tool for fund, ETF, BDC, and money market fund data with actions for lookup, search, portfolio, and more ([a531baa8](https://github.com/dgunning/edgartools/commit/a531baa8))
+
+- **MCP Analysis Prompts** — Added fund_analysis, filing_comparison, and activist_tracking pre-built analysis workflows ([6e446997](https://github.com/dgunning/edgartools/commit/6e446997))
+
+- **Structured Error Classification in MCP** — Tool errors are now classified with error codes, user-friendly messages, and actionable suggestions ([3a65e37a](https://github.com/dgunning/edgartools/commit/3a65e37a))
+
+- **AI Skills Expansion** — Added error recovery patterns, BDC/MMF coverage, and statement hierarchy documentation to AI skills ([291f679c](https://github.com/dgunning/edgartools/commit/291f679c))
+
+### Fixed
+
+- **Recent IPO Tickers Not Resolving** — `Company(ticker)` now falls back to the live SEC `company_tickers.json` when a ticker is missing from the bundled parquet data. The live data is fetched at most once per session and cached, so existing tickers still resolve instantly with no network call ([#676](https://github.com/dgunning/edgartools/issues/676)) ([8caca1a3](https://github.com/dgunning/edgartools/commit/8caca1a3))
+
+- **Refreshed Bundled Ticker Data** — Updated `company_tickers.parquet` from 10,532 to 10,652 tickers, adding 302 new tickers including recent IPOs ([e7e2076c](https://github.com/dgunning/edgartools/commit/e7e2076c))
+
+- **MCP Runtime Bugs** — Fixed issues across proxy, ownership, company, and prompts tools including None proxy handling, Decimal(0) falsiness, and missing tool registrations ([78c83d4c](https://github.com/dgunning/edgartools/commit/78c83d4c), [59c1c4f3](https://github.com/dgunning/edgartools/commit/59c1c4f3), [883a4d1a](https://github.com/dgunning/edgartools/commit/883a4d1a))
+
+- **None balance_sheet Guard** — Protected against None balance_sheet in issue 412 regression tests ([e7dde317](https://github.com/dgunning/edgartools/commit/e7dde317))
+
+- **README Images on PyPI** — Switched to absolute URLs so images render correctly on PyPI ([7f1d3eb7](https://github.com/dgunning/edgartools/commit/7f1d3eb7))
+
+### Changed
+
+- **Test Suite Consolidation** — Deleted 18 redundant test files and reduced 6,200 lines. Added VCR cassettes for 17 metadata tests. CI matrix reduced from 12 to 6 jobs ([474179f9](https://github.com/dgunning/edgartools/commit/474179f9), [85cd6db7](https://github.com/dgunning/edgartools/commit/85cd6db7))
+
+- **MCP Documentation** — Updated docs for all 11 tools and 7 prompts, added HTTP transport setup guide ([5cc4fea1](https://github.com/dgunning/edgartools/commit/5cc4fea1))
+
+## [5.20.2] - 2026-03-04
+
+### Fixed
+
+- **Homepage Fallback When SGML Unavailable** — When the SEC returns empty content for a filing's full submission text (.txt), `Filing.sgml()` now falls back to the filing's homepage index page instead of raising an exception. The fallback provides document attachments with valid URLs for `html()`, `xml()`, `xbrl()`, and `text()`. Network errors and permanent errors (identity, not-found) still propagate correctly ([#674](https://github.com/dgunning/edgartools/issues/674))
+
+- **Cache Bypass Actually Works Now** — The 5.20.1 retry-with-cache-bypass for empty SGML responses was silently ineffective because `httpxthrottlecache` reuses a single client instance, ignoring `bypass_cache` after initial creation. The retry now uses a direct `httpx` request that completely bypasses the cache layer ([#672](https://github.com/dgunning/edgartools/issues/672))
+
+- **BDC Pipe-Separated Investment Identifiers** — Recent BDC filings (e.g., Blue Owl) use pipe-separated format (`Company | Type | Issuer Category`) for investment identifiers instead of comma-separated. The parser now handles both formats
+
+## [5.20.1] - 2026-03-03
+
+### Fixed
+
+- **Empty SEC Responses Permanently Cached** — Empty or error responses from SEC SGML endpoints were stored in the local cache indefinitely, meaning subsequent requests would silently return empty content rather than retrying against the network. The fetcher now detects empty/error payloads and retries once with cache bypass before giving up ([#672](https://github.com/dgunning/edgartools/issues/672)) ([45574373](https://github.com/dgunning/edgartools/commit/45574373))
+
+- **Automatic Cache Clear on Upgrade** — On first run after upgrading to 5.20.1, the local SGML cache is automatically cleared once to remove any stale empty responses that were cached under prior versions. No manual intervention required ([45574373](https://github.com/dgunning/edgartools/commit/45574373))
+
+- **Graceful Test Skip on Transient SEC Responses** — Network tests that exercise SGML downloads now detect transient empty responses from SEC and skip with an informative message instead of failing the suite ([4fc4a889](https://github.com/dgunning/edgartools/commit/4fc4a889))
+
+## [5.20.0] - 2026-03-02
+
+### Added
+
+- **Fund Data Object Improvements** — Performance, cohesion, and memory safety improvements across fund data objects ([0b020c3](https://github.com/dgunning/edgartools/commit/0b020c3))
+
+- **`fact_id` in XBRL Facts DataFrame** — The unique fact identifier is now exposed in the XBRL facts DataFrame for traceability and cross-referencing ([0785b87](https://github.com/dgunning/edgartools/commit/0785b87))
+
+### Fixed
+
+- **SGML Parser Diagnostic Errors** — "Unknown SGML format" errors now include content previews, response length, and pattern-specific messages for rate limiting, empty responses, and SEC error pages ([bf8a58a](https://github.com/dgunning/edgartools/commit/bf8a58a))
+
+- **BDC Test Reliability** — Switched BDC integration tests from ARCC to Blue Owl (CIK 1812554) due to ARCC's latest 10-K returning empty content from SEC ([84c58ee](https://github.com/dgunning/edgartools/commit/84c58ee))
+
+### Documentation
+
+- **Fund Entity Guide** — Added comprehensive fund entity guide, updated data-objects index, and created fund AI skill YAML ([140aaa2](https://github.com/dgunning/edgartools/commit/140aaa2))
+
+## [5.19.1] - 2026-03-01
+
+### Fixed
+
+- **Dead SEC Series Endpoint** — Replaced dead SEC `cgi-bin/series` endpoint with `browse-edgar` ([af86bd2](https://github.com/dgunning/edgartools/commit/af86bd2))
+
 ## [5.19.0] - 2026-02-28
 
 ### Added

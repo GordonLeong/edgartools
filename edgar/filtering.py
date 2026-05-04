@@ -5,7 +5,7 @@ This module provides functions for filtering pyarrow Tables containing SEC EDGAR
 based on various criteria like dates, forms, CIK numbers, etc.
 """
 import datetime
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -15,13 +15,14 @@ from edgar.dates import extract_dates
 
 
 def filter_by_date(data: pa.Table,
-                   date: Union[str, datetime.datetime],
+                   date: Union[str, datetime.datetime, Tuple[Optional[str], Optional[str]]],
                    date_col: str) -> pa.Table:
     # If datetime convert to string
     if isinstance(date, datetime.date) or isinstance(date, datetime.datetime):
         date = date.strftime('%Y-%m-%d')
 
-    # Extract the date parts ... this should raise an exception if we cannot
+    # Extract the date parts. extract_dates() also accepts the (start, end)
+    # tuple form advertised by Entity.get_filings's type hint (GH #794).
     date_parts = extract_dates(date)
     start_date, end_date, is_range = date_parts
     if is_range:
@@ -106,8 +107,8 @@ def filter_by_ticker(data: pa.Table,
     return filter_by_cik(data, cik=ciks)
 
 
-def filter_by_year(data: pa.Table, 
-                   year: Union[int, List[int]], 
+def filter_by_year(data: pa.Table,
+                   year: Union[int, List[int]],
                    date_col: str = 'filing_date') -> pa.Table:
     """Filter data by year(s)
 
@@ -154,9 +155,9 @@ def filter_by_year(data: pa.Table,
     return data.filter(combined_filter)
 
 
-def filter_by_quarter(data: pa.Table, 
-                      year: Union[int, List[int]], 
-                      quarter: Union[int, List[int]], 
+def filter_by_quarter(data: pa.Table,
+                      year: Union[int, List[int]],
+                      quarter: Union[int, List[int]],
                       date_col: str = 'filing_date') -> pa.Table:
     """Filter data by specific year-quarter combinations
 
@@ -175,7 +176,7 @@ def filter_by_quarter(data: pa.Table,
     # Quarter date ranges
     quarter_ranges = {
         1: ("01-01", "03-31"),
-        2: ("04-01", "06-30"), 
+        2: ("04-01", "06-30"),
         3: ("07-01", "09-30"),
         4: ("10-01", "12-31")
     }

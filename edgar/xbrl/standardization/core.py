@@ -23,11 +23,11 @@ _reverse_index = None
 
 
 def _get_reverse_index():
-    """Lazy load the reverse index singleton."""
+    """Lazy load the reverse index singleton (shared with reverse_index module)."""
     global _reverse_index
     if _reverse_index is None:
-        from .reverse_index import ReverseIndex
-        _reverse_index = ReverseIndex()
+        from .reverse_index import get_reverse_index
+        _reverse_index = get_reverse_index()
     return _reverse_index
 
 
@@ -721,7 +721,7 @@ class ConceptMapper:
         serializable_mappings = {}
         for std_concept, mappings in self.pending_mappings.items():
             serializable_mappings[std_concept] = [
-                {"concept": c, "confidence": conf, "label": lbl} 
+                {"concept": c, "confidence": conf, "label": lbl}
                 for c, conf, lbl in mappings
             ]
 
@@ -981,7 +981,8 @@ def _assign_sections_bottom_up(
             logger.debug("Bottom-up: Assigned section '%s' to '%s'", current_section, label)
 
 
-def standardize_statement(statement_data: List[Dict[str, Any]], mapper: ConceptMapper) -> List[Dict[str, Any]]:
+def standardize_statement(statement_data: List[Dict[str, Any]], mapper: ConceptMapper,
+                          industry: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     Add standard concept metadata to statement items without replacing labels.
 
@@ -994,6 +995,8 @@ def standardize_statement(statement_data: List[Dict[str, Any]], mapper: ConceptM
     Args:
         statement_data: List of statement line items
         mapper: ConceptMapper instance (used for context building)
+        industry: Optional Fama-French 48 industry code (e.g., "Banks") for
+                 industry-specific overrides
 
     Returns:
         Statement data with standard_concept metadata added where mappings exist
@@ -1049,21 +1052,21 @@ def standardize_statement(statement_data: List[Dict[str, Any]], mapper: ConceptM
     # Second pass - add standard_concept metadata without changing labels
     result = []
 
-    # Track which indices need standardization for faster lookup
-    standardize_indices = {i for i, _, _, _ in items_to_standardize}
+    # Build dict for O(1) lookup in second pass (avoids O(n²) scan)
+    items_by_index = {i: (concept, label, context) for i, concept, label, context in items_to_standardize}
 
     # Process all items
     for i, item in enumerate(statement_data):
-        if i not in standardize_indices:
+        if i not in items_by_index:
             # Items that don't need standardization are used as-is
             result.append(item)
             continue
 
         # Get the prepared data for this item
-        _, concept, label, context = next((x for x in items_to_standardize if x[0] == i), (None, None, None, None))
+        concept, label, context = items_by_index[i]
 
         # Get the standard concept identifier (e.g., "CommonEquity", not "Total Stockholders' Equity")
-        standard_concept = reverse_index.get_standard_concept(concept, context)
+        standard_concept = reverse_index.get_standard_concept(concept, context, industry=industry)
 
         if standard_concept:
             # Add standard_concept as metadata, preserve original label
@@ -1097,13 +1100,13 @@ def create_default_mappings_file(file_path: str) -> None:
     # Create a minimal set of mappings to get started
     minimal_mappings = {
         StandardConcept.REVENUE.value: [
-            "us-gaap_Revenue", 
+            "us-gaap_Revenue",
             "us-gaap_SalesRevenueNet",
             "us-gaap_Revenues"
         ],
         StandardConcept.NET_INCOME.value: [
             "us-gaap_NetIncome",
-            "us-gaap_NetIncomeLoss", 
+            "us-gaap_NetIncomeLoss",
             "us-gaap_ProfitLoss"
         ],
         StandardConcept.TOTAL_ASSETS.value: [

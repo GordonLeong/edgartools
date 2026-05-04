@@ -259,13 +259,13 @@ def get_cik_tickers():
     # Primary source: company_tickers.json (via bundled parquet or SEC API)
     return get_company_tickers(clean_name=False, clean_suffix=False)[['ticker', 'cik']]
 
-@lru_cache(maxsize=None)
+@lru_cache(maxsize=1)
 def list_all_tickers():
     """List all tickers from the merged data"""
     return get_cik_tickers()['ticker'].tolist()
 
 
-@lru_cache(maxsize=None)
+@lru_cache(maxsize=1)
 def get_company_cik_lookup():
     df = get_cik_tickers()
 
@@ -282,19 +282,36 @@ def get_company_cik_lookup():
     return lookup
 
 
-@lru_cache(maxsize=None)
+# Manual overrides for CIKs where the shortest non-hyphenated ticker is wrong
+_PREFERRED_TICKER = {
+    1166691: 'CMCSA',   # Comcast common stock, not CCZ (ETN)
+    1161611: 'ALMMF',   # Aluminum Corp of China, not ACH (conflicts with CIK 75252)
+    1787518: 'DFNSW',   # T3 Defense, not DFNS (conflicts with CIK 1777946)
+}
+
+
+@lru_cache(maxsize=1)
 def get_cik_ticker_lookup():
-    """Create a mapping of CIK to base ticker symbols.
-    For CIKs with multiple tickers, uses the shortest ticker (usually the base symbol).
+    """Create a mapping of CIK to the primary ticker symbol for each CIK.
+
+    For CIKs with multiple tickers, prefers non-hyphenated tickers (common stock)
+    over hyphenated ones (share classes like BRK-A), then picks the shortest.
     """
-    company_lookup = get_company_cik_lookup()
-    cik_to_tickers = {}
-    for ticker, cik in company_lookup.items():
-        # Prefer the base ticker (without share class)
-        base_ticker = ticker.split('-')[0]
-        if cik not in cik_to_tickers or len(base_ticker) < len(cik_to_tickers[cik]):
-            cik_to_tickers[cik] = base_ticker
-    return cik_to_tickers
+    df = get_cik_tickers()
+    cik_to_ticker = {}
+    for ticker, cik in zip(df['ticker'], df['cik'], strict=False):
+        has_hyphen = '-' in ticker
+        prev = cik_to_ticker.get(cik)
+        if prev is None:
+            cik_to_ticker[cik] = ticker
+        else:
+            prev_has_hyphen = '-' in prev
+            # Prefer non-hyphenated over hyphenated; among equals, prefer shortest
+            if (prev_has_hyphen and not has_hyphen) or \
+               (prev_has_hyphen == has_hyphen and len(ticker) < len(prev)):
+                cik_to_ticker[cik] = ticker
+    cik_to_ticker.update(_PREFERRED_TICKER)
+    return cik_to_ticker
 
 
 @lru_cache(maxsize=128)
@@ -352,7 +369,7 @@ def find_ticker_safe(cik: Union[int, str]) -> Optional[str]:
         # This ensures we never trigger network calls
         return None
 
-@lru_cache(maxsize=None)
+@lru_cache(maxsize=1)
 def get_company_ticker_name_exchange():
     """
     Return a DataFrame with columns [cik	name	ticker	exchange]
@@ -374,7 +391,7 @@ def get_companies_by_exchange(exchange: Union[List[str], str]):
     return df[df['exchange'].str.lower().isin(exchanges)].reset_index(drop=True)
 
 
-@lru_cache(maxsize=None)
+@lru_cache(maxsize=1)
 def get_mutual_fund_tickers():
     """
     Get mutual fund tickers.
@@ -385,7 +402,7 @@ def get_mutual_fund_tickers():
     return pd.DataFrame(data['data'], columns=['cik', 'seriesId', 'classId', 'ticker'])
 
 
-@lru_cache(maxsize=None)
+@lru_cache(maxsize=1)
 def get_mutual_fund_lookup():
     df = get_mutual_fund_tickers()
     return dict(zip(df['ticker'], df['cik'], strict=False))
@@ -402,10 +419,42 @@ def find_mutual_fund_cik(ticker):
     return lookup.get(ticker.upper())
 
 
+@lru_cache(maxsize=1)
+def _get_live_company_cik_lookup() -> Optional[dict]:
+    """
+    Fetch the live company_tickers.json from the SEC and build a ticker→CIK dict.
+
+    Called once per session as a fallback when a ticker is missing from the
+    bundled parquet data (e.g. recent IPOs). Returns None on network failure.
+    """
+    try:
+        tickers_json = download_json(build_company_tickers_url())
+        lookup = {}
+        for item in tickers_json.values():
+            ticker = item['ticker'].upper()
+            cik = int(item['cik_str'])
+            lookup[ticker] = cik
+            base = ticker.split('-')[0]
+            if base not in lookup:
+                lookup[base] = cik
+        return lookup
+    except Exception as e:
+        log.debug(f"Failed to fetch live ticker data from SEC: {e}")
+        return None
+
+
 def find_company_cik(ticker):
     lookup = get_company_cik_lookup()
     ticker = ticker.upper().replace('.', '-')
-    return lookup.get(ticker)
+    cik = lookup.get(ticker)
+    if cik is not None:
+        return cik
+
+    # Fallback: try live SEC data for tickers missing from bundled parquet
+    live_lookup = _get_live_company_cik_lookup()
+    if live_lookup is not None:
+        return live_lookup.get(ticker)
+    return None
 
 def find_company_ticker(cik: Union[int, str]) -> Union[str, List[str], None]:
     """

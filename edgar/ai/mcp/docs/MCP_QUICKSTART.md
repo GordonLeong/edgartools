@@ -45,7 +45,19 @@ ENTRYPOINT ["python", "-m", "edgar.ai"]
 
 Docker is ideal for server deployments, CI/CD pipelines, and teams that want a consistent, isolated runtime.
 
-All methods start the MCP server listening on stdin/stdout. The server is stateless -- it makes SEC API calls on demand and holds no persistent data, which makes it straightforward to run centrally for a team.
+All methods start the MCP server using stdio transport by default. The server is stateless -- it makes SEC API calls on demand and holds no persistent data, which makes it straightforward to run centrally for a team.
+
+### Option 5: HTTP Transport (Remote / Team Deployment)
+```bash
+edgartools-mcp --transport streamable-http --port 8000
+```
+
+This starts the server on `http://0.0.0.0:8000/mcp` using the MCP Streamable HTTP transport. Use this for remote deployments, team servers, or registry-listed instances.
+
+**CLI flags:**
+- `--transport stdio` (default) or `--transport streamable-http`
+- `--host 0.0.0.0` (default) — bind address
+- `--port 8000` (default) — listen port
 
 ## Client Configuration
 
@@ -134,6 +146,32 @@ Configuration file location:
 3. Look for the MCP server indicator (🔨) in the bottom-right corner of the chat input
 4. Try asking: "Research Apple Inc with financials"
 
+**Configuration for Remote HTTP Server:**
+
+If the server is running with `--transport streamable-http`:
+```json
+{
+  "mcpServers": {
+    "edgartools": {
+      "url": "http://localhost:8000/mcp"
+    }
+  }
+}
+```
+
+Replace `localhost:8000` with your server's host and port for remote deployments.
+
+### Claude Code (CLI)
+
+```bash
+claude mcp add edgartools -- uvx --from "edgartools[ai]" edgartools-mcp
+```
+
+Set your SEC identity:
+```bash
+export EDGAR_IDENTITY="Your Name your.email@example.com"
+```
+
 ### Cline (VS Code Extension)
 
 **Configuration File:** `.vscode/cline_mcp_settings.json` in your project
@@ -186,7 +224,7 @@ See [hackerdogs/edgartools-mcp](https://hub.docker.com/r/hackerdogs/edgartools-m
 
 ## Available Tools
 
-Once connected, AI agents have access to five intent-based tools:
+Once connected, AI agents have access to these tools:
 
 #### 1. edgar_company
 Get company profile, financials, recent filings, and ownership in one call.
@@ -199,7 +237,7 @@ Get company profile, financials, recent filings, and ownership in one call.
 - `identifier` (required): Company ticker, CIK, or name
 - `include`: Sections to return: `profile`, `financials`, `filings`, `ownership`
 - `periods` (default: 4): Number of financial periods
-- `annual` (default: true): Annual vs quarterly data
+- `period`: `annual` (default), `quarterly`, or `ttm` (trailing twelve months)
 
 #### 2. edgar_search
 Search for companies or filings.
@@ -217,7 +255,18 @@ Search for companies or filings.
 - `limit` (default: 10): Max results
 
 #### 3. edgar_filing
-Read filing content or specific sections.
+Examine any SEC filing by accession number or URL.
+
+**Example prompts:**
+- "Tell me about filing 0000320193-23-000077"
+- "What's in this SEC filing?" (paste URL)
+
+**Parameters:**
+- `input` (required): Accession number or SEC URL
+- `detail`: `minimal`, `standard` (default), or `full`
+
+#### 4. edgar_read
+Read specific sections from a filing.
 
 **Example prompts:**
 - "Show me the risk factors from Apple's latest 10-K"
@@ -228,7 +277,7 @@ Read filing content or specific sections.
 - OR `identifier` + `form`: Company + form type
 - `sections`: `summary`, `business`, `risk_factors`, `mda`, `financials`, or `all`
 
-#### 4. edgar_compare
+#### 5. edgar_compare
 Compare companies side-by-side or analyze an industry.
 
 **Example prompts:**
@@ -241,19 +290,105 @@ Compare companies side-by-side or analyze an industry.
 - `metrics`: Metrics to compare (e.g., `revenue`, `net_income`)
 - `periods` (default: 4): Number of periods
 
-#### 5. edgar_ownership
-Insider transactions, institutional holders, or fund portfolios.
+#### 6. edgar_ownership
+Insider transactions or fund portfolios.
 
 **Example prompts:**
 - "Show me recent insider transactions at Apple"
-- "Who are Tesla's largest institutional holders?"
 - "What stocks does Berkshire Hathaway hold?"
 
 **Parameters:**
 - `identifier` (required): Company ticker, CIK, or fund CIK
-- `analysis_type`: `insiders`, `institutions`, or `fund_portfolio`
-- `days` (default: 90): Lookback for insider trades
+- `analysis_type` (required): `insiders`, `fund_portfolio`, or `portfolio_diff`
 - `limit` (default: 20): Max results
+
+#### 7. edgar_monitor
+Get the latest SEC filings in real-time.
+
+**Example prompts:**
+- "What SEC filings were just submitted?"
+- "Show me recent 8-K filings"
+
+**Parameters:**
+- `form`: Filter by form type (e.g., `8-K`, `4`)
+- `limit` (default: 20): Max results
+
+#### 8. edgar_trends
+Get financial time series with growth rates.
+
+**Example prompts:**
+- "Show me Apple's revenue trend over 5 years"
+- "What is Microsoft's EPS growth trajectory?"
+
+**Parameters:**
+- `identifier` (required): Company ticker, CIK, or name
+- `concepts`: Metrics to track (e.g., `revenue`, `net_income`, `eps`)
+- `periods` (default: 5): Number of periods
+
+#### 9. edgar_screen
+Discover companies by industry, exchange, or state.
+
+**Example prompts:**
+- "Find pharmaceutical companies on NYSE"
+- "What software companies are incorporated in Delaware?"
+
+**Parameters:**
+- `industry`: Industry keyword
+- `sic`: Exact SIC code (integer)
+- `exchange`: Exchange name (e.g., `NYSE`, `Nasdaq`)
+- `state`: State of incorporation (2-letter code)
+- `limit` (default: 25): Max results
+
+#### 10. edgar_text_search
+Full-text search across SEC filing content.
+
+**Example prompts:**
+- "Search for filings mentioning artificial intelligence"
+- "Find 8-K filings about cybersecurity incidents"
+
+**Parameters:**
+- `query` (required): Search text
+- `identifier`: Limit to a specific company
+- `forms`: Filter by form types (e.g., `["8-K", "10-K"]`)
+- `start_date`: Start date filter
+
+#### 11. edgar_fund
+Get fund, ETF, BDC, and money market fund data.
+
+**Example prompts:**
+- "Look up the Vanguard 500 Index Fund"
+- "Show me SPY's portfolio holdings"
+- "What money market funds does Vanguard offer?"
+
+**Parameters:**
+- `action` (required): `lookup`, `search`, `portfolio`, `money_market`, `bdc_search`, or `bdc_portfolio`
+- `identifier`: Fund ticker, series ID, or CIK
+- `query`: Search text for fund or BDC name
+- `limit` (default: 20): Max results
+
+#### 12. edgar_proxy
+Get executive compensation and governance data from DEF 14A proxy statements.
+
+**Example prompts:**
+- "What is Apple's CEO compensation?"
+- "Show me Microsoft's pay vs performance data"
+
+**Parameters:**
+- `identifier` (required): Company ticker, CIK, or name
+- `filing_index` (default: 0): Which proxy filing (0=latest)
+
+#### 13. edgar_notes
+Drill into financial statement notes and disclosures — the detail behind the numbers.
+
+**Example prompts:**
+- "Show me Apple's revenue recognition policy"
+- "What are Tesla's debt maturities from their latest 10-K notes?"
+
+**Parameters:**
+- `identifier` (required): Company ticker, CIK, or name
+- `topic`: Note topic to search for (e.g., "revenue", "debt", "leases", "contingencies"). Omit for table of contents.
+- `form` (default: "10-K"): Filing form type. Use "10-Q" for quarterly notes.
+- `detail` (default: "standard"): `minimal` (titles only), `standard` (context + tables), or `full` (includes DataFrame data)
 
 ## Environment Variables
 
@@ -416,7 +551,7 @@ python -m edgar.ai --test
 ```
 Testing EdgarTools MCP Server Configuration...
 
-✓ EdgarTools v4.18.0 imports successfully
+✓ EdgarTools v5.26.0 imports successfully
 ✓ MCP framework available
 ✓ EDGAR_IDENTITY configured: Your Name your@email.com
 ✓ Core EdgarTools functionality available
@@ -432,7 +567,7 @@ If any checks fail, the test will show specific error messages and installation 
    ```bash
    python -m edgar.ai
    ```
-   You should see: `Starting EdgarTools MCP Server v4.18.0`
+   You should see: `Starting EdgarTools MCP Server v5.26.0`
 
 2. **Configure your MCP client** (see configurations above)
 
@@ -507,8 +642,7 @@ If you're currently using the old `run_mcp_server.py` entry point, here's how to
 
 ## Next Steps
 
-- Read the [full MCP documentation](../../../docs-internal/features/edgartools-mcp-ai-support.md) for advanced features
-- See [AI package structure](../../../docs-internal/features/ai-mcp-package-structure-plan.md) for architecture details
+- Read the [documentation](https://dgunning.github.io/edgartools/ai/) for the full tools reference and workflow guides
 - Explore example notebooks showing MCP workflows
 
 ## Support

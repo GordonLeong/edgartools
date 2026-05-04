@@ -847,6 +847,13 @@ class Filings:
         return cast(Dict[str, Any], self.to_pandas().head(max_rows).to_dict(orient="records"))
 
     def __getitem__(self, item):
+        if isinstance(item, slice):
+            start, stop, step = item.indices(len(self.data))
+            if step != 1:
+                return [self.get_filing_at(i) for i in range(start, stop, step)]
+            length = max(0, stop - start)
+            sliced_data = self.data.slice(start, length)
+            return Filings(sliced_data)
         return self.get_filing_at(item)
 
     def __len__(self):
@@ -1554,7 +1561,27 @@ class Filing:
         """
         Get the period of report for the filing
         """
-        return self.sgml().period_of_report
+        period = self.sgml().period_of_report
+        if not period and not is_using_local_storage():
+            # Fallback: extract from homepage index page (network call)
+            # Skip when local storage is enabled to avoid unexpected network access
+            try:
+                period = self.homepage.period_of_report
+            except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadTimeout,
+                    httpcore.TimeoutException, httpcore.ConnectError, httpcore.NetworkError):
+                pass  # Offline or network unavailable — return None
+        return period
+
+    @cached_property
+    def agent(self) -> Optional[str]:
+        """Identify the filing agent that prepared this filing (e.g. Workiva, Donnelley)."""
+        from edgar.documents.agents import detect_filing_agent
+        doc = self.sgml().attachments.primary_html_document
+        if not doc:
+            doc = self.homepage.primary_html_document
+        if doc and doc.content:
+            return detect_filing_agent(doc.content)
+        return None
 
     @property
     def attachments(self):
@@ -1585,6 +1612,17 @@ class Filing:
                 ownership: Ownership = self.obj()
                 html = ownership.to_html()
             else:
+                # Only call self.obj() for XML-native forms (XmlFiling, etc.)
+                # that have to_html() rendering. Skip for HTML-based data objects
+                # (S-1, S-3, 424B, etc.) whose from_filing() calls html(),
+                # which would cause infinite recursion.
+                from edgar.xmlfiling import XML_FILING_FORMS
+                if self.form in XML_FILING_FORMS:
+                    xml_obj = self.obj()
+                    if xml_obj and hasattr(xml_obj, 'to_html'):
+                        rendered = xml_obj.to_html()
+                        if rendered:
+                            return rendered
                 html = self.homepage.primary_html_document.download()
         if isinstance(html, bytes):
             try:
@@ -1601,7 +1639,17 @@ class Filing:
     def xml(self) -> Optional[str]:
         """Returns the xml contents of the primary document if it is xml"""
         sgml = self.sgml()
-        return sgml.xml()
+        xml_content = sgml.xml()
+        if not xml_content:
+            # Fallback: download XML from homepage attachment
+            try:
+                document = self.homepage.primary_xml_document
+                if document and not document.is_binary() and not document.empty:
+                    return document.content
+            except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadTimeout,
+                    httpcore.TimeoutException, httpcore.ConnectError, httpcore.NetworkError):
+                pass  # Offline or network unavailable — return None
+        return xml_content
 
     @lru_cache(maxsize=4)
     def text(self) -> str:
@@ -1639,6 +1687,11 @@ class Filing:
 
     def full_text_submission(self) -> str:
         """Return the complete text submission file"""
+        if is_using_local_storage():
+            local_path = self._local_path()
+            if local_path.exists():
+                from edgar.sgml.sgml_common import read_content_as_string
+                return read_content_as_string(local_path)
         downloaded = download_file(self.text_url, as_text=True)
         assert downloaded is not None
         return str(downloaded)
@@ -1818,7 +1871,12 @@ class Filing:
 
     def sgml(self) -> FilingSGML:
         """
-        Read the filing from the local storage path if it exists
+        Read the filing from the local storage path if it exists.
+
+        If the full submission text (.txt) is unavailable due to a transient SEC
+        error, falls back to constructing a minimal FilingSGML from the filing's
+        homepage index page. The fallback provides document attachments with valid
+        URLs but without in-memory content or SGML header metadata.
         """
         if self._sgml:
             return self._sgml
@@ -1833,7 +1891,31 @@ class Filing:
                 self._sgml = get_datamule_filing(self.accession_no)
 
         if self._sgml is None:
-            self._sgml = FilingSGML.from_filing(self)
+            if is_using_local_storage():
+                log.warning(
+                    f"Filing {self.accession_no} not found in local storage. "
+                    f"Falling back to network fetch. "
+                    f"Download this filing to avoid network calls when using local storage."
+                )
+            try:
+                self._sgml = FilingSGML.from_filing(self)
+            except (ValueError, Exception) as e:
+                from edgar.sgml.sgml_parser import SECIdentityError, SECFilingNotFoundError, SECHTMLResponseError
+                from edgar.httprequests import IdentityNotSetException
+                # Don't fall back on permanent errors — propagate them
+                if isinstance(e, (SECIdentityError, SECFilingNotFoundError, IdentityNotSetException)):
+                    raise
+                # Don't fall back on network errors — propagate them so callers
+                # (e.g. xbrl()) can show local-storage-aware error messages
+                if isinstance(e, (httpx.TimeoutException, httpx.ConnectError, httpx.ReadTimeout,
+                                  httpcore.TimeoutException, httpcore.ConnectError, httpcore.NetworkError)):
+                    raise
+                # Transient content errors (empty response, HTML error page) — fall back to homepage
+                log.warning(
+                    f"SGML fetch failed for {self.accession_no}, "
+                    f"falling back to homepage: {e}"
+                )
+                self._sgml = FilingSGML.from_homepage(self.homepage)
         return self._sgml
 
     @cached_property
@@ -1852,6 +1934,21 @@ class Filing:
         """
         if self.reports:
             return self.reports.statements
+
+    @cached_property
+    def viewer(self):
+        """
+        Get the SEC Interactive Data Viewer for this filing.
+
+        Returns a FilingViewer with categorized report navigation,
+        concept-annotated data, and a navigable concept graph.
+        Requires an XBRL filing with MetaLinks.json in the SGML bundle.
+
+        Returns:
+            FilingViewer if MetaLinks.json is available, None otherwise
+        """
+        from edgar.xbrl.viewer import FilingViewer
+        return FilingViewer.from_filing(self)
 
     @cached_property
     def index_headers(self) -> IndexHeaders:
@@ -1955,6 +2052,77 @@ class Filing:
             return self.__get_regex_search_index.search(query)
         return self.__get_bm25_search_index.search(query)
 
+    def grep(self, pattern: str, *, regex: bool = False, document: Optional[str] = None) -> 'GrepResult':
+        """
+        Grep for exact text matches across all filing documents.
+
+        Like `grep -ri` on a directory — searches the primary document and all
+        exhibits/attachments by default. Case-insensitive. Returns every match
+        with its location (which document) and surrounding context.
+
+        Args:
+            pattern: Text to search for (exact match, case-insensitive)
+            regex: If True, treat pattern as a regular expression
+            document: Narrow search to a specific document. Use "primary" for
+                     the main filing document, or a document type like "EX-10.1"
+
+        Returns:
+            GrepResult containing GrepMatch objects with location and context
+
+        Examples:
+            >>> filing.grep("going concern")
+            >>> filing.grep("Level 3", document="primary")
+            >>> filing.grep(r"Level\\s+3", regex=True)
+        """
+        from edgar.search.grep import GrepResult, _grep_text
+
+        all_matches = []
+
+        try:
+            attachments = self.attachments
+        except Exception:
+            return GrepResult(pattern, [])
+
+        for attachment in attachments:
+            # Filter by document if specified
+            if document:
+                if document.lower() == "primary":
+                    if attachment.sequence_number != "1":
+                        continue
+                else:
+                    # Match by document_type (e.g. "EX-10.1") or document filename
+                    doc_type = (attachment.document_type or "").upper()
+                    if document.upper() not in doc_type and document.lower() not in (attachment.document or "").lower():
+                        continue
+
+            # Skip binary/non-text attachments
+            if attachment.empty or attachment.is_binary():
+                continue
+
+            # Get text content
+            try:
+                text = attachment.text()
+            except Exception as e:
+                log.debug(f"grep: could not extract text from {attachment.document}: {e}")
+                continue
+
+            if not text:
+                continue
+
+            # Determine location label
+            doc_type = attachment.document_type or ""
+            if attachment.sequence_number == "1":
+                location = "primary"
+            elif doc_type:
+                location = doc_type
+            else:
+                location = attachment.document or f"doc-{attachment.sequence_number}"
+
+            matches = _grep_text(text, pattern, location, regex=regex)
+            all_matches.extend(matches)
+
+        return GrepResult(pattern, all_matches)
+
     @property
     def filing_url(self) -> str:
         return f"{self.base_dir}/{self.document.document}"
@@ -2045,6 +2213,45 @@ class Filing:
         file_number = filings[0].file_number
         return company.get_filings(file_number=file_number,
                                    sort_by=[("filing_date", "ascending"), ("accession_number", "ascending")])
+
+    def correspondence(self) -> Optional['CorrespondenceThread']:
+        """Get the correspondence thread for this filing.
+
+        Works on ANY filing type (not just CORRESP/UPLOAD). For example,
+        calling correspondence() on a 10-K will find any SEC review
+        correspondence related to that 10-K via file_number.
+
+        Returns:
+            CorrespondenceThread or None if no correspondence found.
+        """
+        from edgar.correspondence import Correspondence, CorrespondenceThread, CorrespondenceType, CORRESPONDENCE_FORMS
+
+        # If this is already a correspondence filing, parse and get its thread
+        if self.form in CORRESPONDENCE_FORMS:
+            c = Correspondence.from_filing(self)
+            return c.thread
+
+        # For other filings, build a synthetic Correspondence with the file_number
+        # from EDGAR metadata and delegate to CorrespondenceThread
+        company = self.get_entity()
+        if not company:
+            return None
+
+        filings = company.get_filings(accession_number=self.accession_no)
+        if not filings or filings.empty:
+            return None
+        file_number = filings[0].file_number
+        if not file_number:
+            return None
+
+        # Create a minimal Correspondence to anchor the thread search
+        anchor = Correspondence(
+            filing=self,
+            body=None,
+            correspondence_type=CorrespondenceType.COMPANY_LETTER,
+            referenced_file_number=file_number,
+        )
+        return CorrespondenceThread.from_correspondence(anchor)
 
     def __hash__(self):
         return hash(self.accession_no)
@@ -2241,13 +2448,24 @@ class Filing:
         attachments = self.attachments
 
         # The filing information table
-        filing_info_table = Table("Accession Number", "Filing Date", "Period of Report", "Documents",
+        # Include agent column only if it's been detected (avoids triggering
+        # a network call just for display — agent is a cached_property)
+        agent_name = self.__dict__.get('agent')  # Check cache without triggering lookup
+        info_columns = ["Accession Number", "Filing Date", "Period of Report", "Documents"]
+        if agent_name:
+            info_columns.append("Agent")
+        filing_info_table = Table(*info_columns,
                                   header_style="dim",
                                   box=box.SIMPLE_HEAD)
-        filing_info_table.add_row(accession_number_text(self.accession_no),
-                                  Text(str(self.filing_date), "bold"),
-                                  Text(self.period_of_report or "-", "bold"),
-                                  f"{len(attachments)}")
+        info_row = [
+            accession_number_text(self.accession_no),
+            Text(str(self.filing_date), "bold"),
+            Text(self.period_of_report or "-", "bold"),
+            f"{len(attachments)}",
+        ]
+        if agent_name:
+            info_row.append(Text(agent_name, "cyan"))
+        filing_info_table.add_row(*info_row)
 
         # Build content elements
         elements = [filing_info_table]
@@ -2514,7 +2732,9 @@ def unicode_for_form(form: str) -> str:
         return '💬'  # Speech bubble for communications
 
     # Proxy statements
-    elif form in ['DEF 14A', 'PRE 14A', 'DEFA14A', 'DEFC14A']:
+    elif form in ['DEF 14A', 'PRE 14A', 'DEFA14A', 'DEFC14A', 'DEFM14A', 'DEFN14A',
+                  'DFAN14A', 'DEFR14A', 'DFRN14A', 'PREC14A', 'PREM14A', 'PREN14A',
+                  'PRER14A', 'PRRN14A', 'PX14A6G', 'PX14A6N']:
         return '📩'  # Envelope for shareholder communications
 
     # Default case - generic document

@@ -6,10 +6,17 @@ repo_name: dgunning/edgartools
 extra_css:
   - stylesheets/extra.css
 
+extra_javascript:
+  - javascripts/nav-enhance.js
+
 markdown_extensions:
   - admonition
+  - attr_list
   - pymdownx.details
   - pymdownx.superfences
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
 
 theme:
   name: material
@@ -61,7 +68,9 @@ nav:
     - Company Subsets: company-subsets.md
     - Track Insiders: guides/company-insiders.md
     - Entity API: guides/entity-api-guide.md
+    - Company Classification: guides/company-classification.md
     - Business Development Companies: guides/bdc-guide.md
+    - Reference Data: guides/reference-data.md
 
   # ==========================================
   # FILINGS - Access SEC filings
@@ -69,6 +78,7 @@ nav:
   - Filings:
     - Working with Filings: guides/working-with-filing.md
     - Search & Filter: guides/searching-filings.md
+    - Full-Text Search & Grep: guides/full-text-search.md
     - Filter by Criteria: guides/filtering-filings.md
     - Current Filings: guides/current-filings.md
     - Attachments: guides/filing-attachments.md
@@ -81,6 +91,7 @@ nav:
     - Overview: data-objects.md
     - Annual & Quarterly: concepts/data-objects.md
     - Current Events (8-K): eightk-filings.md
+    - Foreign Issuer Reports (6-K): guides/sixk-data-object-guide.md
     - Insider Trades (Form 4): insider-filings.md
     - Track Insider Activity: guides/track-form4.md
     - Beneficial Ownership (13D/G): guides/schedule13dg-data-object-guide.md
@@ -89,13 +100,17 @@ nav:
     - Money Market Funds (N-MFP): guides/moneymarketfund-data-object-guide.md
     - Fund Census (N-CEN): guides/fundcensus-data-object-guide.md
     - Fund Shareholder Reports (N-CSR): guides/fundshareholderreport-data-object-guide.md
+    - Fund Fee Notices (24F-2NT): guides/twentyfourf-data-object-guide.md
     - Proxy Statements (DEF 14A): guides/proxystatement-data-object-guide.md
     - Private Offerings (Form D): guides/formd-data-object-guide.md
     - Crowdfunding (Form C): guides/formc-data-object-guide.md
     - Sale Notices (Form 144): guides/form144-data-object-guide.md
     - Fund Voting (N-PX): guides/npx-data-object-guide.md
     - ABS Distribution (10-D): guides/tend-data-object-guide.md
+    - Prospectus Supplements (424B): guides/prospectus424b-data-object-guide.md
+    - Shelf Registrations (S-3): guides/registration-s3-data-object-guide.md
     - Municipal Advisors (MA-I): guides/mai-data-object-guide.md
+    - SEC Correspondence (CORRESP): guides/correspondence-data-object-guide.md
 
   # ==========================================
   # FINANCIALS - Financial statements & data
@@ -106,6 +121,7 @@ nav:
     - Company Facts: guides/company-facts.md
     - Multi-Period Analysis: guides/multi-year-financial-data-api.md
     - Stock Splits & EPS Normalization: guides/stock-splits-eps-normalization.md
+    - Equity Statement Data Layers: guides/equity-statement-data-layers.md
     - XBRL Deep Dive:
       - Overview: xbrl/index.md
       - Query XBRL Facts: xbrl-querying.md
@@ -114,12 +130,18 @@ nav:
       - Dimensions: xbrl/concepts/dimension-handling.md
       - Standardization: xbrl/concepts/standardization.md
       - Footnotes: guides/xbrl-footnotes.md
+      - SEC Interactive Viewer: guides/sec-viewer-guide.md
 
   # ==========================================
   # AI - MCP server & skills for AI agents
   # ==========================================
   - AI Integration:
-    - "MCP Server & Skills": ai-integration.md
+    - Overview: ai/index.md
+    - MCP Server:
+      - Setup: ai/mcp-setup.md
+      - Tools Reference: ai/mcp-tools.md
+      - Workflows: ai/mcp-workflows.md
+    - Skills: ai/skills.md
 
   # ==========================================
   # NOTEBOOKS - Interactive Colab tutorials

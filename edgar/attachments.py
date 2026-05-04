@@ -7,7 +7,7 @@ import tempfile
 import time
 import webbrowser
 import zipfile
-from functools import lru_cache
+
 from pathlib import Path
 from threading import Thread
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
@@ -550,7 +550,7 @@ class Attachments:
             if doc.display_extension == ".html" or doc.display_extension == '.htm':
                 return doc
         """
-        Most filings have html primary documents. Some don't. 
+        Most filings have html primary documents. Some don't.
         E.g. Form's 3,4,5 do when loaded directly from edgar but not when loaded from local files
         However, there are unusual filings with endings like ".fil" that require a return. So return the first one
         """
@@ -963,8 +963,9 @@ class FilingHomepage:
             if datafile.description in xbrl_document_types:
                 return datafile
 
-    @lru_cache(maxsize=1)
     def get_filers(self):
+        if hasattr(self, '_cached_filers'):
+            return self._cached_filers
         filer_divs = self._soup.find_all("div", id="filerDiv")
         filer_infos = []
         for filer_div in filer_divs:
@@ -1008,6 +1009,7 @@ class FilingHomepage:
 
             filer_infos.append(filer_info)
 
+        self._cached_filers = filer_infos
         return filer_infos
 
     @property
@@ -1016,24 +1018,50 @@ class FilingHomepage:
         _,_, period = self.get_filing_dates()
         return period
 
-    @lru_cache(maxsize=None)
     def get_filing_dates(self)-> Optional[Tuple[str,str, Optional[str]]]:
+        if hasattr(self, '_cached_filing_dates'):
+            return self._cached_filing_dates
         # Find the form grouping divs
         grouping_divs = self._soup.find_all("div", class_="formGrouping")
         if len(grouping_divs) == 0:
             return None
-        date_grouping_div = grouping_divs[0]
-        info_divs = date_grouping_div.find_all("div", class_="info")
-        filing_date = info_divs[0].text.strip()
-        accepted_date = info_divs[1].text.strip()
 
-        if len(grouping_divs) > 1:
-            period_grouping_div = grouping_divs[1]
-            first_info_div = period_grouping_div.find("div", class_="info")
-            if first_info_div:
-                period = first_info_div.text.strip()
-                return filing_date, accepted_date, period
-        return filing_date, accepted_date, None
+        # Build a label -> value map by pairing each <div class="infoHead">
+        # with the next sibling <div class="info"> under the same grouping.
+        # This is label-based rather than positional: on multi-filer Schedule
+        # 13D/G filings the Filer(s) block can appear at index 1, and a
+        # positional lookup would return its concatenated filer names as the
+        # period of report, which then crashes downstream isoformat parsers.
+        label_to_value: Dict[str, str] = {}
+        for grouping in grouping_divs:
+            children = [c for c in grouping.find_all("div", recursive=False)
+                        if c.get("class")]
+            current_label: Optional[str] = None
+            for child in children:
+                classes = child.get("class") or []
+                if "infoHead" in classes:
+                    current_label = child.text.strip().lower()
+                elif "info" in classes and current_label is not None:
+                    # Only keep the first value for each label.
+                    label_to_value.setdefault(current_label, child.text.strip())
+                    current_label = None
+
+        filing_date = label_to_value.get("filing date")
+        accepted_date = label_to_value.get("accepted")
+        period = label_to_value.get("period of report")
+
+        # Fall back to the legacy positional layout if the label-based lookup
+        # missed either of the always-present date fields.
+        if filing_date is None or accepted_date is None:
+            info_divs = grouping_divs[0].find_all("div", class_="info")
+            if filing_date is None and len(info_divs) >= 1:
+                filing_date = info_divs[0].text.strip()
+            if accepted_date is None and len(info_divs) >= 2:
+                accepted_date = info_divs[1].text.strip()
+
+        result = filing_date, accepted_date, period
+        self._cached_filing_dates = result
+        return result
 
     @classmethod
     def load(cls, url: str):

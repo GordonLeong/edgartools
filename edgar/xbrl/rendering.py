@@ -269,15 +269,26 @@ class RenderedStatement:
     def periods(self):
         return self.header.periods
 
+    def __getitem__(self, label: str) -> Optional['StatementRow']:
+        """Look up a row by exact label (case-insensitive).
+
+        For drill-down to notes, use Statement.__getitem__ instead which
+        returns a StatementLineItem with .note/.notes properties.
+        """
+        if not self.rows:
+            return None
+        label_lower = label.lower()
+        for row in self.rows:
+            if row.label.lower() == label_lower:
+                return row
+        return None
+
     def to_dict(self) -> Dict[str, Any]:
         """Serialize to a JSON-safe dict.
 
         Pre-applies cell formatters so the resulting dict contains only
         plain Python types (strings, numbers, lists, dicts) and can be
         passed directly to ``json.dumps``.
-
-        ``comparison_data`` is excluded from statement-level metadata
-        because each cell already carries its own ``comparison`` field.
         """
         from datetime import date as _date
 
@@ -335,11 +346,7 @@ class RenderedStatement:
                 'metadata': _json_safe(h.metadata),
             }
 
-        # Filter comparison_data out of metadata — it's redundant
-        filtered_metadata = _json_safe({
-            k: v for k, v in self.metadata.items()
-            if k != 'comparison_data'
-        })
+        filtered_metadata = _json_safe(self.metadata)
 
         return {
             'title': self.title,
@@ -649,41 +656,68 @@ class RenderedStatement:
         except ImportError:
             return "Pandas is required for DataFrame conversion"
 
-    def to_markdown(self) -> str:
-        """Convert to a markdown table representation"""
+    def to_markdown(self, detail: str = 'standard', optimize_for_llm: bool = True) -> str:
+        """Convert to a GitHub-Flavored Markdown table.
+
+        Args:
+            detail: 'minimal' (table only), 'standard' (with header), 'full' (header + footer)
+            optimize_for_llm: When True, drop abstract-only rows with no values
+        """
+        import re as _re
         lines = []
 
-        # Add title as a header
-        lines.append(f"## {self.title}")
-        lines.append("")
+        # Clean title — remove internal terminology
+        clean_title = self.title.replace("(Standardized)", "").strip()
 
-        # Add subtitle info if available
-        if self.fiscal_period_indicator or self.units_note:
-            subtitle_parts = []
-            if self.fiscal_period_indicator:
-                subtitle_parts.append(f"**{self.fiscal_period_indicator}**")
-            if self.units_note:
-                # Remove rich formatting tags from units note
-                clean_units = self.units_note.replace('[italic]', '').replace('[/italic]', '')
-                subtitle_parts.append(f"*{clean_units}*")
-
-            lines.append(" ".join(subtitle_parts))
+        if detail != 'minimal':
+            # Header: ## Statement Title
+            lines.append(f"## {clean_title}")
             lines.append("")
 
-        # Create header row
+            # Company + ticker subtitle
+            company_name = self.metadata.get('company_name', '')
+            ticker = self.metadata.get('ticker', '')
+            if company_name:
+                subtitle = f"**{company_name}**"
+                if ticker:
+                    subtitle += f" ({ticker.upper()})"
+                lines.append(subtitle)
+                lines.append("")
+
+            # Fiscal period + units
+            if self.fiscal_period_indicator or self.units_note:
+                subtitle_parts = []
+                if self.fiscal_period_indicator:
+                    subtitle_parts.append(f"**{self.fiscal_period_indicator}**")
+                if self.units_note:
+                    # Strip ALL Rich markup tags
+                    clean_units = _re.sub(r'\[/?[^\]]+\]', '', self.units_note)
+                    subtitle_parts.append(f"*{clean_units}*")
+                lines.append(" ".join(subtitle_parts))
+                lines.append("")
+
+        # Column header row — right-align numeric columns
         header = [""] + self.header.columns
         lines.append("| " + " | ".join(header) + " |")
 
-        # Add separator row
-        separator = ["---"] + ["---" for _ in self.header.columns]
+        separator = ["---"] + ["---:" for _ in self.header.columns]
         lines.append("| " + " | ".join(separator) + " |")
 
-        # Add data rows
-        for row in self.rows:
-            # Handle indentation for row label
-            indent = "  " * row.level
+        # Non-breaking space for indentation (regular spaces stripped in pipe cells)
+        NBSP = "\u00A0"
 
-            # Format row label based on properties
+        for row in self.rows:
+            # Optionally skip abstract rows with no values
+            if optimize_for_llm and row.is_abstract:
+                has_values = any(
+                    cell.value is not None and cell.value != ""
+                    for cell in row.cells
+                )
+                if not has_values:
+                    continue
+
+            indent = (NBSP * 2) * row.level
+
             if row.is_abstract:
                 label = f"**{indent}{row.label}**"
             elif row.is_dimension:
@@ -691,7 +725,6 @@ class RenderedStatement:
             else:
                 label = f"{indent}{row.label}"
 
-            # Format cell values
             cell_values = []
             for cell in row.cells:
                 cell_value = cell.formatter(cell.value)
@@ -702,9 +735,19 @@ class RenderedStatement:
                 else:
                     cell_values.append(cell_value)
 
-            # Add the row
             row_data = [label] + cell_values
             lines.append("| " + " | ".join(row_data) + " |")
+
+        # Footer for 'full' detail
+        if detail == 'full':
+            lines.append("")
+            clean_units = ""
+            if self.units_note:
+                clean_units = _re.sub(r'\[/?[^\]]+\]', '', self.units_note)
+            footer_parts = ["*Source: SEC XBRL*"]
+            if clean_units:
+                footer_parts.append(f"*{clean_units}*")
+            lines.append(" · ".join(footer_parts))
 
         return "\n".join(lines)
 
@@ -789,7 +832,7 @@ def html_to_text(html: str) -> str:
 
 
 def _format_period_labels(
-    periods_to_display: List[Tuple[str, str]], 
+    periods_to_display: List[Tuple[str, str]],
     entity_info: Dict[str, Any],
     statement_type: str,
     show_date_range: bool = False
@@ -799,7 +842,7 @@ def _format_period_labels(
 
     This function processes period keys and labels to create human-readable period labels
     for financial statements. When show_date_range=True, duration periods are displayed
-    with both start and end dates (e.g., "Jan 1, 2023 - Mar 31, 2023"). When 
+    with both start and end dates (e.g., "Jan 1, 2023 - Mar 31, 2023"). When
     show_date_range=False (default), only the end date is shown (e.g., "Mar 31, 2023").
 
     The function handles various input formats:
@@ -934,15 +977,21 @@ def _format_period_labels(
 
                 # Determine quarter number for quarterly periods
                 if 80 <= duration_days <= 100:  # Quarterly period
-                    month = end_date_obj.month
-                    if month <= 3 or month == 12:
-                        q_num = "Q1"
-                    elif month <= 6:
-                        q_num = "Q2"
-                    elif month <= 9:
-                        q_num = "Q3"
+                    fy_end_month = entity_info.get('fiscal_year_end_month') if entity_info else None
+                    if fy_end_month:
+                        month_offset = (end_date_obj.month - fy_end_month - 1) % 12
+                        q_num = f"Q{(month_offset // 3) + 1}"
                     else:
-                        q_num = "Q4"
+                        # Fallback to calendar quarters if no fiscal year info
+                        month = end_date_obj.month
+                        if month <= 3 or month == 12:
+                            q_num = "Q1"
+                        elif month <= 6:
+                            q_num = "Q2"
+                        elif month <= 9:
+                            q_num = "Q3"
+                        else:
+                            q_num = "Q4"
             except (ValueError, TypeError, IndexError):
                 pass
         # For instant periods, extract the date
@@ -976,10 +1025,10 @@ def _format_period_labels(
                             final_label = format_date(end_date_obj)
 
                             # Add quarter info if available
-                            if q_num and statement_type in ['IncomeStatement', 'CashFlowStatement']:
+                            if q_num and statement_type in ['IncomeStatement', 'CashFlowStatement', 'StatementOfEquity', 'ComprehensiveIncome']:
                                 final_label = f"{final_label} ({q_num})"
                             # Add YTD indicator for year-to-date periods
-                            elif duration_days and statement_type in ['IncomeStatement', 'CashFlowStatement']:
+                            elif duration_days and statement_type in ['IncomeStatement', 'CashFlowStatement', 'StatementOfEquity', 'ComprehensiveIncome']:
                                 if 175 <= duration_days <= 190:  # ~6 months
                                     final_label = f"{final_label} (YTD)"
                                 elif 265 <= duration_days <= 285:  # ~9 months
@@ -1094,10 +1143,10 @@ def _format_period_labels(
                     final_label = f"{format_date(start_date_obj)} - {final_label}"
 
                 # If we have quarter info, ensure it's present for income/cash flow statements
-                if q_num and statement_type in ['IncomeStatement', 'CashFlowStatement'] and f"({q_num})" not in final_label:
+                if q_num and statement_type in ['IncomeStatement', 'CashFlowStatement', 'StatementOfEquity', 'ComprehensiveIncome'] and f"({q_num})" not in final_label:
                     final_label = f"{final_label} ({q_num})"
                 # Add YTD indicator for year-to-date periods if not already added
-                elif duration_days and statement_type in ['IncomeStatement', 'CashFlowStatement'] and "(YTD)" not in final_label:
+                elif duration_days and statement_type in ['IncomeStatement', 'CashFlowStatement', 'StatementOfEquity', 'ComprehensiveIncome'] and "(YTD)" not in final_label:
                     if 175 <= duration_days <= 190:  # ~6 months
                         final_label = f"{final_label} (YTD)"
                     elif 265 <= duration_days <= 285:  # ~9 months
@@ -1117,10 +1166,10 @@ def _format_period_labels(
                     final_label = f"{format_date(start_date_obj)} - {format_date(end_date_obj)}"
 
                     # Add quarter info if available
-                    if q_num and statement_type in ['IncomeStatement', 'CashFlowStatement']:
+                    if q_num and statement_type in ['IncomeStatement', 'CashFlowStatement', 'StatementOfEquity', 'ComprehensiveIncome']:
                         final_label = f"{final_label} ({q_num})"
                     # Add YTD indicator for year-to-date periods
-                    elif duration_days and statement_type in ['IncomeStatement', 'CashFlowStatement']:
+                    elif duration_days and statement_type in ['IncomeStatement', 'CashFlowStatement', 'StatementOfEquity', 'ComprehensiveIncome']:
                         if 175 <= duration_days <= 190:  # ~6 months
                             final_label = f"{final_label} (YTD)"
                         elif 265 <= duration_days <= 285:  # ~9 months
@@ -1129,10 +1178,10 @@ def _format_period_labels(
                     final_label = format_date(end_date_obj)
 
                     # Add quarter info if available
-                    if q_num and statement_type in ['IncomeStatement', 'CashFlowStatement']:
+                    if q_num and statement_type in ['IncomeStatement', 'CashFlowStatement', 'StatementOfEquity', 'ComprehensiveIncome']:
                         final_label = f"{final_label} ({q_num})"
                     # Add YTD indicator for year-to-date periods
-                    elif duration_days and statement_type in ['IncomeStatement', 'CashFlowStatement']:
+                    elif duration_days and statement_type in ['IncomeStatement', 'CashFlowStatement', 'StatementOfEquity', 'ComprehensiveIncome']:
                         if 175 <= duration_days <= 190:  # ~6 months
                             final_label = f"{final_label} (YTD)"
                         elif 265 <= duration_days <= 285:  # ~9 months
@@ -1160,8 +1209,8 @@ def _format_period_labels(
 
 
 def _create_units_note(
-    is_monetary_statement: bool, 
-    dominant_scale: int, 
+    is_monetary_statement: bool,
+    dominant_scale: int,
     shares_scale: Optional[int]
 ) -> str:
     """
@@ -1540,7 +1589,7 @@ def render_statement(
     is_monetary_statement = statement_type in ['BalanceSheet', 'IncomeStatement', 'CashFlowStatement']
 
     # Format period headers, but keep original tuples for now (we'll use the fully parsed objects later)
-    # These are now PeriodData objects but we'll continue with string period_keys for compatibility 
+    # These are now PeriodData objects but we'll continue with string period_keys for compatibility
     formatted_period_objects_initial, fiscal_period_indicator = _format_period_labels(
         periods_to_display, entity_info, statement_type, show_date_range
     )
@@ -1737,7 +1786,6 @@ def render_statement(
             'standard': standard,
             'show_date_range': show_date_range,
             'entity_info': entity_info,
-            'comparison_data': comparison_data,
             **footer_metadata  # Add footer metadata
         },
         statement_type=statement_type,
@@ -1900,7 +1948,7 @@ def generate_rich_representation(xbrl) -> Union[str, 'Panel']:
     """
     Generate a rich representation of the XBRL document.
 
-    Follows the EdgarTools design language (docs/internal/design-language.md):
+    Follows the EdgarTools design language:
     - Card-based layout with box.ROUNDED, expand=False
     - Semantic colors from edgar.display.styles
     - No emojis - uses unicode symbols from SYMBOLS

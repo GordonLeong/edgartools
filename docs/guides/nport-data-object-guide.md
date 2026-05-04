@@ -72,6 +72,14 @@ The `derivatives_data()` DataFrame adds columns specific to derivatives:
 | `termination_date` | Contract expiration date |
 | `pct_value` | Percentage of NAV |
 
+!!! tip "See it live on edgar.tools"
+    The code above parses N-PORT portfolio holdings in Python. **edgar.tools** renders fund portfolios visually — browse holdings, derivative exposures, and risk metrics for any registered fund.
+
+    - **[Browse company filings and fund data →](https://app.edgar.tools/companies?utm_source=edgartools-docs&utm_medium=see-live&utm_content=nport-guide)**
+    - **[Watch filings arrive in real time →](https://app.edgar.tools/filings?utm_source=edgartools-docs&utm_medium=see-live&utm_content=nport-guide)**
+
+    Free tier available. Also includes a REST API for programmatic access. [Pricing →](https://app.edgar.tools/pricing?utm_source=edgartools-docs&utm_medium=see-live&utm_content=nport-guide)
+
 ---
 
 ## Derivative-Specific DataFrames
@@ -147,6 +155,16 @@ print(report.general_info.series_name)  # Specific fund/series
 print(report.reporting_period)          # Report date
 ```
 
+Or use the `Fund` class for a simpler path:
+
+```python
+from edgar import Fund
+
+fund = Fund("VFINX")
+report = fund.get_latest_report()       # Latest NPORT-P report
+df = fund.get_portfolio()               # Portfolio as DataFrame
+```
+
 ---
 
 ## Common Analysis Patterns
@@ -195,6 +213,9 @@ if not deriv.empty:
 | `name` | Company - Series | `"VANGUARD CHESTER FUNDS - Vanguard Target..."` |
 | `has_investments` | Has any positions? | `True` |
 | `header.submission_type` | Form type filed | `"NPORT-P"` |
+| `filing` | Source Filing object | `Filing` or `None` |
+| `cik` | CIK of the filer | `"0000102909"` |
+| `series_id` | SEC series ID | `"S000004104"` or `None` |
 
 ---
 
@@ -214,6 +235,8 @@ if not deriv.empty:
 | `report.non_derivatives` | `list` | Raw non-derivative investment objects |
 | `report.get_fund_series()` | `FundSeries` | Fund series object |
 | `report.get_ticker_for_series()` | `str` | Ticker for this series |
+| `report.get_tickers_for_series()` | `list[str]` | All tickers for this series |
+| `report.matches_ticker(ticker)` | `bool` | Whether report matches a ticker |
 
 ---
 
@@ -235,4 +258,5 @@ if not deriv.empty:
 
 ## Related
 
+- [Fund Entities](fund-entity-guide.md) -- look up funds by ticker, navigate hierarchies
 - [Working with Filings](working-with-filing.md) -- general filing access patterns

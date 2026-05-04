@@ -2,6 +2,7 @@
 Node hierarchy for the document tree.
 """
 
+import re
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -15,7 +16,7 @@ from edgar.documents.types import NodeType, SemanticType, Style
 class Node(ABC):
     """
     Base node class for document tree.
-    
+
     All nodes in the document inherit from this class and implement
     the abstract methods for text and HTML generation.
     """
@@ -85,7 +86,7 @@ class Node(ABC):
     def xpath(self, expression: str) -> List['Node']:
         """
         Simple XPath-like node selection.
-        
+
         Supports:
         - //node_type - Find all nodes of type
         - /node_type - Direct children of type
@@ -221,9 +222,12 @@ class ParagraphNode(Node, CacheableMixin):
                             # Remove the leading space from text since we're adding it as separation
                             text = text.lstrip()
 
-                        # Add space if previous text ends with punctuation (sentence boundaries)
+                        # Add space if previous text ends with sentence-ending punctuation,
+                        # but NOT if it looks like an abbreviation (single letter + period,
+                        # or common abbreviation like Inc., Corp., etc.)
                         elif parts and parts[-1].rstrip()[-1:] in '.!?:;':
-                            should_add_space = True
+                            if not self._is_abbreviation_ending(parts[-1]):
+                                should_add_space = True
 
                         # Add space between adjacent inline elements if the current text starts with a letter/digit
                         # This handles cases where whitespace was stripped but spacing is semantically important
@@ -244,6 +248,24 @@ class ParagraphNode(Node, CacheableMixin):
             return ''.join(parts)
 
         return self._get_cached_text(_generate_text)
+
+    @staticmethod
+    def _is_abbreviation_ending(text: str) -> bool:
+        """Check if text ends with an abbreviation rather than a sentence boundary."""
+        stripped = text.rstrip()
+        if not stripped:
+            return False
+        # Single letter + period BUT NOT after SEC terms like "Class A.", "Series B.", "Exhibit A."
+        # where the letter is an identifier, not an abbreviation component
+        if re.search(r'\b[A-Za-z]\.$', stripped):
+            # Exclude SEC classification patterns where a single letter is a label, not abbreviation
+            if re.search(r'(?:Class|Series|Exhibit|Schedule|Part|Annex|Appendix|Grade|Tier|Type|Group|Tranche)\s+[A-Z]\.$', stripped):
+                return False
+            return True
+        # Common abbreviations that end with a period
+        if re.search(r'(?:Inc|Corp|Ltd|Jr|Sr|Dr|Mr|Mrs|Ms|vs|etc|approx|est|Vol|No|Dept)\.$', stripped):
+            return True
+        return False
 
     def html(self) -> str:
         """Generate paragraph HTML."""
@@ -349,7 +371,7 @@ class ContainerNode(Node, CacheableMixin):
         return ''
 
 
-@dataclass 
+@dataclass
 class SectionNode(ContainerNode):
     """Document section node."""
     type: NodeType = field(default=NodeType.SECTION, init=False)

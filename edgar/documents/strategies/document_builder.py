@@ -28,7 +28,7 @@ from edgar.documents.types import ParseContext, SemanticType, Style
 class DocumentBuilder:
     """
     Builds Document node tree from parsed HTML.
-    
+
     Handles the conversion of HTML elements into structured nodes
     with proper hierarchy and metadata.
     """
@@ -47,7 +47,7 @@ class DocumentBuilder:
         'small', 'mark', 'del', 'ins', 'sub', 'sup',
         'code', 'kbd', 'var', 'samp', 'abbr', 'cite',
         'q', 'time', 'font',
-        # IXBRL inline elements for simple values - should not break text flow  
+        # IXBRL inline elements for simple values - should not break text flow
         'ix:nonfraction', 'ix:footnote', 'ix:fraction'
     }
 
@@ -61,7 +61,7 @@ class DocumentBuilder:
     def __init__(self, config: ParserConfig, strategies: Dict[str, Any]):
         """
         Initialize document builder.
-        
+
         Args:
             config: Parser configuration
             strategies: Dictionary of parsing strategies
@@ -78,10 +78,10 @@ class DocumentBuilder:
     def build(self, tree: HtmlElement) -> DocumentNode:
         """
         Build document from HTML tree.
-        
+
         Args:
             tree: Parsed HTML tree
-            
+
         Returns:
             Document root node
         """
@@ -106,11 +106,11 @@ class DocumentBuilder:
     def _process_element(self, element: HtmlElement, parent: Node) -> Optional[Node]:
         """
         Process HTML element into node.
-        
+
         Args:
             element: HTML element to process
             parent: Parent node
-            
+
         Returns:
             Created node or None if skipped
         """
@@ -343,9 +343,21 @@ class DocumentBuilder:
                 text_node.set_metadata('original_tag', tag)
                 return text_node
 
-        elif tag in ['ix:nonNumeric', 'ix:continuation']:
-            # IXBRL elements that can contain complex content including tables
-            # Process as container to allow proper table parsing
+        elif tag in ['ix:nonnumeric', 'ix:continuation']:
+            # IXBRL elements can contain simple inline text (e.g., "S." in "U.S.")
+            # or complex content including tables. Treat as inline when simple,
+            # as container when complex to preserve table structure.
+            has_block_children = any(
+                child.tag in self.BLOCK_ELEMENTS or child.tag in ('table', 'div', 'p')
+                for child in element if hasattr(child, 'tag')
+            )
+            if not has_block_children:
+                text = self._get_element_text(element)
+                if text:
+                    text_node = TextNode(content=text, style=style)
+                    text_node.set_metadata('original_tag', tag)
+                    text_node.set_metadata('inline', True)
+                    return text_node
             return ContainerNode(tag_name=tag, style=style)
 
         # Default: create container for unknown elements
@@ -357,7 +369,7 @@ class DocumentBuilder:
         # Get text content first - all page numbers should be short
         text_content = element.text_content().strip()
 
-        # Must be short content (1-8 chars to handle "Page X" format) 
+        # Must be short content (1-8 chars to handle "Page X" format)
         if len(text_content) > 8 or len(text_content) == 0:
             return False
 

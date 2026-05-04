@@ -14,6 +14,23 @@ from edgar.documents.table_nodes import Cell, Row, TableNode
 from edgar.documents.types import TableType
 
 
+def _text_content(elem) -> str:
+    """Extract text content from an lxml element, compatible with both
+    lxml.html.HtmlElement and lxml.etree._Element (from iterparse)."""
+    if hasattr(elem, 'text_content'):
+        return elem.text_content()
+    # Manual extraction for raw etree elements
+    parts = []
+    if elem.text:
+        parts.append(elem.text)
+    for child in elem.iter():
+        if child is not elem and child.text:
+            parts.append(child.text)
+        if child.tail:
+            parts.append(child.tail)
+    return ''.join(parts)
+
+
 class TableProcessor:
     """
     Advanced table processing with type detection and structure analysis.
@@ -65,10 +82,10 @@ class TableProcessor:
     def process(self, element: HtmlElement) -> TableNode:
         """
         Process table element into TableNode.
-        
+
         Args:
             element: HTML table element
-            
+
         Returns:
             Processed TableNode
         """
@@ -149,7 +166,7 @@ class TableProcessor:
                 # If the previous row was a header and this row has years or units,
                 # it's likely part of the header
                 if headers_found and not is_header_row:
-                    row_text = tr.text_content().strip()
+                    row_text = _text_content(tr).strip()
                     # Check for units like "(in millions)" or "(in thousands)"
                     if '(in millions)' in row_text or '(in thousands)' in row_text or '(in billions)' in row_text:
                         is_header_row = True
@@ -187,11 +204,11 @@ class TableProcessor:
                         # Don't consider this as "data started" if it's likely a header-related row
                         is_header_related = (
                             # Unit descriptions
-                            '(in millions)' in row_text_lower or 
-                            '(in thousands)' in row_text_lower or 
+                            '(in millions)' in row_text_lower or
+                            '(in thousands)' in row_text_lower or
                             '(in billions)' in row_text_lower or
                             'except per share' in row_text_lower or
-                            # Financial period descriptions  
+                            # Financial period descriptions
                             'year ended' in row_text_lower or
                             'months ended' in row_text_lower or
                             # Mostly just spacing/formatting
@@ -380,7 +397,7 @@ class TableProcessor:
             return False
 
         # Get row text for analysis
-        row_text = tr.text_content()
+        row_text = _text_content(tr)
         row_text_lower = row_text.lower()
 
         # Check for date ranges with financial data (Oracle Table 6 pattern)
@@ -419,7 +436,7 @@ class TableProcessor:
         year_cells = 0
         date_phrases = 0
         for cell in cells:
-            cell_text = cell.text_content().strip()
+            cell_text = _text_content(cell).strip()
             if cell_text:
                 # Check for individual years
                 if re.match(r'^\s*(19\d{2}|20\d{2})\s*$', cell_text):
@@ -449,7 +466,7 @@ class TableProcessor:
 
         # Check for period indicators (quarters, months)
         # But be careful with "fiscal" - it could be data like "Fiscal 2025"
-        period_keywords = ['quarter', 'q1', 'q2', 'q3', 'q4', 'month', 
+        period_keywords = ['quarter', 'q1', 'q2', 'q3', 'q4', 'month',
                           'january', 'february', 'march', 'april', 'may', 'june',
                           'july', 'august', 'september', 'october', 'november', 'december',
                           'ended', 'three months', 'six months', 'nine months']
@@ -457,7 +474,7 @@ class TableProcessor:
         # Special handling for "fiscal" - only treat as header if it's part of a phrase like "fiscal year ended"
         if 'fiscal' in row_text_lower:
             # Check if row has numeric values (suggests it's data, not header)
-            # Look for patterns like "Fiscal 2025 $10,612" 
+            # Look for patterns like "Fiscal 2025 $10,612"
             has_currency_values = bool(re.search(r'\$[\s]*[\d,]+', row_text))
             has_large_numbers = bool(re.search(r'\b\d{1,3}(,\d{3})+\b', row_text))
 
@@ -516,7 +533,7 @@ class TableProcessor:
         text_cells = 0
         number_cells = 0
         for cell in cells:
-            cell_text = cell.text_content().strip()
+            cell_text = _text_content(cell).strip()
             if cell_text:
                 # Remove common symbols for analysis
                 clean_text = cell_text.replace('$', '').replace('%', '').replace(',', '').replace('(', '').replace(')', '')
@@ -573,7 +590,7 @@ class TableProcessor:
         if financial_count >= 2:  # Lowered threshold for better detection
             return TableType.FINANCIAL
 
-        # Check for metrics table  
+        # Check for metrics table
         metrics_count = sum(1 for keyword in self.METRICS_KEYWORDS if keyword in combined_text)
         numeric_cells = sum(1 for row in table.rows for cell in row.cells if cell.is_numeric)
         total_cells = sum(len(row.cells) for row in table.rows)
@@ -588,8 +605,8 @@ class TableProcessor:
         if 'content' in combined_text or 'index' in combined_text:
             # Look for page numbers
             has_page_numbers = any(
-                re.search(r'\b\d{1,3}\b', cell.text()) 
-                for row in table.rows 
+                re.search(r'\b\d{1,3}\b', cell.text())
+                for row in table.rows
                 for cell in row.cells
             )
             if has_page_numbers:

@@ -371,119 +371,131 @@ class Schedule13D:
         """
         Total beneficial ownership across all reporting persons.
 
-        Uses the official SEC memberOfGroup field to determine if reporting
-        persons are filing jointly or separately:
-        - "a" = group member (joint filers) → take unique count
-        - "b" or None = separate filers → sum all positions
-
-        Also detects:
-        - Undeclared joint filers: when all reporting persons have identical
-          share amounts, they are joint filers regardless of member_of_group.
-        - Hierarchical ownership: when percentages sum > 100.5%, this indicates
-          a corporate control chain where parent entities report beneficial
-          ownership of shares held through subsidiaries. In this case, the
-          top of the hierarchy has the true total.
+        Within a single 13D filing, reporting persons always report overlapping
+        beneficial ownership (group formations or control chains). Independent
+        filers file separate forms. The correct aggregate is always max().
 
         Excludes shares flagged with is_aggregate_exclude_shares == True.
         """
         if not self.reporting_persons:
             return 0
 
-        # Filter out shares excluded from aggregation
         included_persons = [p for p in self.reporting_persons
                            if not p.is_aggregate_exclude_shares]
 
         if not included_persons:
             return 0
 
-        # Check for group members using official SEC indicator
-        group_members = [p for p in included_persons
-                        if p.member_of_group == "a"]
-
-        if group_members:
-            # Joint filers: all report the same shares
-            # Take max in case of any data inconsistencies
-            return max(p.aggregate_amount for p in group_members)
-
-        # Check for hierarchical ownership: if percentages sum > 100.5%
-        # this indicates overlapping beneficial ownership through control chain
-        # (using 100.5% buffer to avoid false positives from rounding)
-        total_pct = sum(p.percent_of_class for p in included_persons)
-        if total_pct > 100.5:
-            # Hierarchical structure: top of chain has the true total
-            return max(p.aggregate_amount for p in included_persons)
-
-        # Check for undeclared joint filers: identical values across all persons
-        # When XML doesn't specify member_of_group but all persons report same position
-        shares_list = [p.aggregate_amount for p in included_persons]
-        unique_shares = set(shares_list)
-
-        if len(unique_shares) == 1:
-            # All persons have identical share counts - joint filers
-            return shares_list[0]
-
-        # Separate filers: sum all positions
-        return sum(p.aggregate_amount for p in included_persons)
+        return max(p.aggregate_amount for p in included_persons)
 
     @property
     def total_percent(self) -> float:
         """
         Total ownership percentage across all reporting persons.
 
-        Uses the official SEC memberOfGroup field to determine if reporting
-        persons are filing jointly or separately:
-        - "a" = group member (joint filers) → take unique percentage
-        - "b" or None = separate filers → sum all percentages
-
-        Also detects:
-        - Undeclared joint filers: when all reporting persons have identical
-          percentages, they are joint filers regardless of member_of_group.
-        - Hierarchical ownership: when percentages sum > 100.5%, this indicates
-          a corporate control chain where parent entities report beneficial
-          ownership of shares held through subsidiaries. In this case, the
-          top of the hierarchy has the true percentage.
+        Within a single 13D filing, reporting persons always report overlapping
+        beneficial ownership (group formations or control chains). Independent
+        filers file separate forms. The correct aggregate is always max().
 
         Excludes shares flagged with is_aggregate_exclude_shares == True.
         """
         if not self.reporting_persons:
             return 0.0
 
-        # Filter out shares excluded from aggregation
         included_persons = [p for p in self.reporting_persons
                            if not p.is_aggregate_exclude_shares]
 
         if not included_persons:
             return 0.0
 
-        # Check for group members using official SEC indicator
-        group_members = [p for p in included_persons
-                        if p.member_of_group == "a"]
+        return max(p.percent_of_class for p in included_persons)
 
-        if group_members:
-            # Joint filers: all report the same percentage
-            # Take max in case of any data inconsistencies
-            return max(p.percent_of_class for p in group_members)
+    def to_context(self, detail: str = 'standard') -> str:
+        """
+        AI-optimized context string.
 
-        # Check for hierarchical ownership: if percentages sum > 100.5%
-        # this indicates overlapping beneficial ownership through control chain
-        # (using 100.5% buffer to avoid false positives from rounding)
-        total_pct = sum(p.percent_of_class for p in included_persons)
-        if total_pct > 100.5:
-            # Hierarchical structure: top of chain has the true percentage
-            return max(p.percent_of_class for p in included_persons)
+        Args:
+            detail: 'minimal' (~100 tokens), 'standard' (~300 tokens), 'full' (~500+ tokens)
+        """
+        lines = []
 
-        # Check for undeclared joint filers: identical values across all persons
-        # When XML doesn't specify member_of_group but all persons report same position
-        percent_list = [p.percent_of_class for p in included_persons]
-        unique_percents = set(percent_list)
+        # === IDENTITY ===
+        form_label = "SCHEDULE13D/A" if self.is_amendment else "SCHEDULE13D"
+        lines.append(f"{form_label}: {self.issuer_info.name}")
+        lines.append("")
 
-        if len(unique_percents) == 1:
-            # All persons have identical percentages - joint filers
-            return percent_list[0]
+        # === CORE METADATA ===
+        lines.append(f"Filed: {self.filing_date}")
+        if self.date_of_event:
+            lines.append(f"Event Date: {self.date_of_event}")
+        lines.append(f"Security: {self.security_info.title}")
+        lines.append(f"Ownership: {self.total_percent:.1f}% ({self.total_shares:,} shares)")
 
-        # Separate filers: sum all percentages, capped at 100%
-        # (can exceed 100% slightly due to rounding in source data)
-        return min(total_pct, 100.0)
+        # Filer(s)
+        if self.reporting_persons:
+            names = [p.name for p in self.reporting_persons[:3]]
+            filer_str = ", ".join(names)
+            if len(self.reporting_persons) > 3:
+                filer_str += f" (+{len(self.reporting_persons) - 3} more)"
+            lines.append(f"Filer: {filer_str}")
+
+        if detail == 'minimal':
+            return "\n".join(lines)
+
+        # === STANDARD ===
+        if self.issuer_info.cik:
+            lines.append(f"Issuer CIK: {self.issuer_info.cik}")
+        if self.issuer_info.cusip:
+            lines.append(f"CUSIP: {self.issuer_info.cusip}")
+
+        # Per-person breakdown
+        if len(self.reporting_persons) > 0:
+            lines.append("")
+            lines.append("REPORTING PERSONS:")
+            for p in self.reporting_persons[:5]:
+                p_line = f"  {p.name}: {p.percent_of_class:.1f}% ({p.aggregate_amount:,} shares)"
+                if p.type_of_reporting_person:
+                    p_line += f" [{p.type_of_reporting_person}]"
+                lines.append(p_line)
+            if len(self.reporting_persons) > 5:
+                lines.append(f"  ... ({len(self.reporting_persons) - 5} more)")
+
+        # Purpose (abbreviated)
+        if self.items and self.items.item4_purpose_of_transaction:
+            purpose = self.items.item4_purpose_of_transaction[:200]
+            lines.append("")
+            lines.append(f"PURPOSE: {purpose}")
+
+        # Available actions
+        lines.append("")
+        lines.append("AVAILABLE ACTIONS:")
+        lines.append("  .issuer_info               Subject company details")
+        lines.append("  .reporting_persons          All filer details with voting/dispositive power")
+        lines.append("  .items                      Narrative items 1-7")
+        lines.append("  .total_shares               Aggregate beneficial ownership")
+        lines.append("  .total_percent              Ownership percentage")
+        lines.append("  .signatures                 Filing signatures")
+
+        if detail == 'standard':
+            return "\n".join(lines)
+
+        # === FULL ===
+        # Source of funds
+        if self.items and self.items.item3_source_of_funds:
+            lines.append("")
+            lines.append(f"Source of Funds: {self.items.item3_source_of_funds[:150]}")
+
+        # Voting/dispositive power detail for first person
+        if self.reporting_persons:
+            p = self.reporting_persons[0]
+            lines.append("")
+            lines.append(f"VOTING/DISPOSITIVE POWER ({p.name}):")
+            lines.append(f"  Sole Voting: {p.sole_voting_power:,}")
+            lines.append(f"  Shared Voting: {p.shared_voting_power:,}")
+            lines.append(f"  Sole Dispositive: {p.sole_dispositive_power:,}")
+            lines.append(f"  Shared Dispositive: {p.shared_dispositive_power:,}")
+
+        return "\n".join(lines)
 
     def __rich__(self):
         """Rich console rendering"""
@@ -792,124 +804,125 @@ class Schedule13G:
         """
         Total beneficial ownership across all reporting persons.
 
-        Uses the official SEC memberGroup field to determine if reporting
-        persons are filing jointly or separately:
-        - "a" = group member (joint filers) → take unique count
-        - "b" or None = separate filers → sum all positions
-
-        Also detects:
-        - Undeclared joint filers: when all reporting persons have identical
-          share amounts, they are joint filers regardless of member_of_group.
-        - Hierarchical ownership: when percentages sum > 100.5%, this indicates
-          a corporate control chain where parent entities report beneficial
-          ownership of shares held through subsidiaries. In this case, the
-          top of the hierarchy has the true total.
+        Within a single 13G filing, reporting persons always report overlapping
+        beneficial ownership (group formations or control chains). Independent
+        filers file separate forms. The correct aggregate is always max().
 
         Excludes shares flagged with is_aggregate_exclude_shares == True.
         """
         if not self.reporting_persons:
             return 0
 
-        # Filter out shares excluded from aggregation
         included_persons = [p for p in self.reporting_persons
                            if not p.is_aggregate_exclude_shares]
 
         if not included_persons:
             return 0
 
-        # Check for group members using official SEC indicator
-        group_members = [p for p in included_persons
-                        if p.member_of_group == "a"]
-
-        if group_members:
-            # Joint filers: all report the same shares
-            # Take max in case of any data inconsistencies
-            return max(p.aggregate_amount for p in group_members)
-
-        # Check for hierarchical ownership: if percentages sum > 100.5%
-        # this indicates overlapping beneficial ownership through control chain
-        # (using 100.5% buffer to avoid false positives from rounding)
-        total_pct = sum(p.percent_of_class for p in included_persons)
-        if total_pct > 100.5:
-            # Hierarchical structure: top of chain has the true total
-            return max(p.aggregate_amount for p in included_persons)
-
-        # Check for undeclared joint filers: identical values across all persons
-        # When XML doesn't specify member_of_group but all persons report same position
-        shares_list = [p.aggregate_amount for p in included_persons]
-        unique_shares = set(shares_list)
-
-        if len(unique_shares) == 1:
-            # All persons have identical share counts - joint filers
-            return shares_list[0]
-
-        # Separate filers: sum all positions
-        return sum(p.aggregate_amount for p in included_persons)
+        return max(p.aggregate_amount for p in included_persons)
 
     @property
     def total_percent(self) -> float:
         """
         Total ownership percentage across all reporting persons.
 
-        Uses the official SEC memberGroup field to determine if reporting
-        persons are filing jointly or separately:
-        - "a" = group member (joint filers) → take unique percentage
-        - "b" or None = separate filers → sum all percentages
-
-        Also detects:
-        - Undeclared joint filers: when all reporting persons have identical
-          percentages, they are joint filers regardless of member_of_group.
-        - Hierarchical ownership: when percentages sum > 100.5%, this indicates
-          a corporate control chain where parent entities report beneficial
-          ownership of shares held through subsidiaries. In this case, the
-          top of the hierarchy has the true percentage.
+        Within a single 13G filing, reporting persons always report overlapping
+        beneficial ownership (group formations or control chains). Independent
+        filers file separate forms. The correct aggregate is always max().
 
         Excludes shares flagged with is_aggregate_exclude_shares == True.
         """
         if not self.reporting_persons:
             return 0.0
 
-        # Filter out shares excluded from aggregation
         included_persons = [p for p in self.reporting_persons
                            if not p.is_aggregate_exclude_shares]
 
         if not included_persons:
             return 0.0
 
-        # Check for group members using official SEC indicator
-        group_members = [p for p in included_persons
-                        if p.member_of_group == "a"]
-
-        if group_members:
-            # Joint filers: all report the same percentage
-            # Take max in case of any data inconsistencies
-            return max(p.percent_of_class for p in group_members)
-
-        # Check for hierarchical ownership: if percentages sum > 100.5%
-        # this indicates overlapping beneficial ownership through control chain
-        # (using 100.5% buffer to avoid false positives from rounding)
-        total_pct = sum(p.percent_of_class for p in included_persons)
-        if total_pct > 100.5:
-            # Hierarchical structure: top of chain has the true percentage
-            return max(p.percent_of_class for p in included_persons)
-
-        # Check for undeclared joint filers: identical values across all persons
-        # When XML doesn't specify member_of_group but all persons report same position
-        percent_list = [p.percent_of_class for p in included_persons]
-        unique_percents = set(percent_list)
-
-        if len(unique_percents) == 1:
-            # All persons have identical percentages - joint filers
-            return percent_list[0]
-
-        # Separate filers: sum all percentages, capped at 100%
-        # (can exceed 100% slightly due to rounding in source data)
-        return min(total_pct, 100.0)
+        return max(p.percent_of_class for p in included_persons)
 
     @property
     def is_passive_investor(self) -> bool:
         """Check if this is a passive investor (13G are passive by definition)"""
         return True
+
+    def to_context(self, detail: str = 'standard') -> str:
+        """
+        AI-optimized context string.
+
+        Args:
+            detail: 'minimal' (~100 tokens), 'standard' (~300 tokens), 'full' (~500+ tokens)
+        """
+        lines = []
+
+        # === IDENTITY ===
+        form_label = "SCHEDULE13G/A" if self.is_amendment else "SCHEDULE13G"
+        lines.append(f"{form_label}: {self.issuer_info.name} (Passive)")
+        lines.append("")
+
+        # === CORE METADATA ===
+        lines.append(f"Filed: {self.filing_date}")
+        if self.event_date:
+            lines.append(f"Event Date: {self.event_date}")
+        lines.append(f"Security: {self.security_info.title}")
+        lines.append(f"Ownership: {self.total_percent:.1f}% ({self.total_shares:,} shares)")
+
+        if self.reporting_persons:
+            names = [p.name for p in self.reporting_persons[:3]]
+            filer_str = ", ".join(names)
+            if len(self.reporting_persons) > 3:
+                filer_str += f" (+{len(self.reporting_persons) - 3} more)"
+            lines.append(f"Filer: {filer_str}")
+
+        if detail == 'minimal':
+            return "\n".join(lines)
+
+        # === STANDARD ===
+        if self.issuer_info.cik:
+            lines.append(f"Issuer CIK: {self.issuer_info.cik}")
+        if self.issuer_info.cusip:
+            lines.append(f"CUSIP: {self.issuer_info.cusip}")
+        if self.rule_designation:
+            lines.append(f"Rule: {self.rule_designation}")
+
+        # Per-person breakdown
+        if len(self.reporting_persons) > 0:
+            lines.append("")
+            lines.append("REPORTING PERSONS:")
+            for p in self.reporting_persons[:5]:
+                p_line = f"  {p.name}: {p.percent_of_class:.1f}% ({p.aggregate_amount:,} shares)"
+                if p.type_of_reporting_person:
+                    p_line += f" [{p.type_of_reporting_person}]"
+                lines.append(p_line)
+            if len(self.reporting_persons) > 5:
+                lines.append(f"  ... ({len(self.reporting_persons) - 5} more)")
+
+        # Available actions
+        lines.append("")
+        lines.append("AVAILABLE ACTIONS:")
+        lines.append("  .issuer_info               Subject company details")
+        lines.append("  .reporting_persons          All filer details with voting/dispositive power")
+        lines.append("  .items                      Structured items data")
+        lines.append("  .total_shares               Aggregate beneficial ownership")
+        lines.append("  .total_percent              Ownership percentage")
+        lines.append("  .is_passive_investor        Always True for 13G")
+
+        if detail == 'standard':
+            return "\n".join(lines)
+
+        # === FULL ===
+        if self.reporting_persons:
+            p = self.reporting_persons[0]
+            lines.append("")
+            lines.append(f"VOTING/DISPOSITIVE POWER ({p.name}):")
+            lines.append(f"  Sole Voting: {p.sole_voting_power:,}")
+            lines.append(f"  Shared Voting: {p.shared_voting_power:,}")
+            lines.append(f"  Sole Dispositive: {p.sole_dispositive_power:,}")
+            lines.append(f"  Shared Dispositive: {p.shared_dispositive_power:,}")
+
+        return "\n".join(lines)
 
     def __rich__(self):
         """Rich console rendering"""

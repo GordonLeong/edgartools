@@ -60,14 +60,12 @@ INDUSTRY_FUNCTIONS = {
 
 @tool(
     name="edgar_compare",
-    description="""Compare multiple companies or analyze an industry sector.
-
-Provide specific companies OR select an industry for automatic peer selection.
+    description="""Use this to compare companies side-by-side on financial metrics, or analyze an industry sector with automatic peer selection.
 
 Examples:
-- Compare specific: identifiers=["AAPL", "MSFT", "GOOGL"]
-- Industry peers: industry="software", limit=5
-- Custom metrics: identifiers=["JPM", "BAC", "WFC"], metrics=["revenue", "net_income", "assets"]""",
+- Compare companies: identifiers=["AAPL", "MSFT", "GOOGL"]
+- Industry analysis: industry="software", limit=5
+- Bank comparison: identifiers=["JPM", "BAC", "WFC"], metrics=["revenue", "net_income", "assets"]""",
     params={
         "identifiers": {
             "type": "array",
@@ -178,7 +176,7 @@ async def edgar_compare(
 
         next_steps = [
             "Use edgar_company for detailed analysis of a specific company",
-            "Use edgar_filing to read specific SEC filings"
+            "Use edgar_read to read specific filing sections"
         ]
 
         return success(result, next_steps=next_steps)
@@ -295,13 +293,13 @@ async def _compare_company(
         # Compute revenue growth if requested (uses time_series for YoY)
         if "growth" in metrics:
             try:
-                ts = facts.time_series("Revenue", periods=periods + 1)
+                ts = facts.time_series("Revenue", periods=(periods + 1) * 5)
                 if ts is not None and not ts.empty:
                     # Filter to annual periods only
                     annual_ts = ts[ts['fiscal_period'] == 'FY'] if annual else ts
                     if len(annual_ts) >= 2:
                         values = annual_ts['numeric_value'].tolist()
-                        if len(values) >= 2 and values[1] and values[1] != 0:
+                        if len(values) >= 2 and values[0] is not None and values[1] is not None and values[1] != 0:
                             extracted["revenue_growth_yoy"] = f"{(values[0] - values[1]) / abs(values[1]) * 100:.1f}%"
             except Exception as e:
                 logger.debug(f"Could not compute growth for {identifier}: {e}")
